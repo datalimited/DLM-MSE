@@ -1,0 +1,572 @@
+---
+title: "Plots MSE HCRs"
+author: "Jessica Walsh"
+date: "1 June 2016"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+##for individual running, not set up for markdown
+
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, cache=TRUE, autodep = TRUE,
+  message = FALSE, warning = FALSE, fig.height = 5, fig.width = 8)
+```
+
+```{r load-packages, echo=FALSE}
+library(dplyr)
+library(ggplotFL)
+library(knitr)
+library(FLash)
+library(FLBRP)
+library(FLa4a)
+library(FLAssess)
+
+#source('../analysis/functions.R')
+source('analysis/functions.R')
+
+```
+
+```{r complete_bbmsy_graph}
+sp_lookup = data.frame(c('BC','SA','PS','SJ','BF','CR'),
+                       c('Bocaccio','Sardine','Petrale sole',
+                         'Skipjack tuna','Bullet and Frigate Tuna',
+                       	'Corvina reina'))
+colnames(sp_lookup)<-c('Symbol', 'Name')
+
+species <- c("BC","SA","PS","SJ","BF","CR")
+```
+
+```{r full_graph_hcr_projection}
+reps = 4
+species <- c("CR")
+ts = 20
+sp = "CR"
+#j = 10
+ed = "OW"
+
+iter = 1
+iters = 1
+proj_yr = 20
+buffer <- 0.75 # or 0.8
+
+
+#pdf(file=paste0("plots/projected-mse-plots-TS",ts,"-",ed,"-true.pdf"),width =8, height = 10)
+#pdf(file=paste0("plots/projected-mse-plots-",sp,"-TS",ts,"-",ed,".pdf"),width =8, height = 10)
+
+for (sp in species) {
+	for (j in reps) {
+		
+
+filename <- paste0(sp,"_TS",ts,"_",ed,"_rep",j)
+
+##load sim data and data from first assessment
+# load(paste0("../data-raw/sims-", sp,"-",ed,".Rdata"))
+# stock_preassess <- readRDS(file=paste0("../data-generated/preassess_results/",ed,"/stock_preassess_",filename,".rds"))
+# mse_runs <- readRDS(file=paste0("../data-generated/mse_results/",ed,"/mse_projection_",filename,".rds"))
+ 
+load(paste0("data-raw/sims-", sp,"-",ed,".Rdata"))
+stock_preassess <- readRDS(file=paste0("data-generated/preassess_results/",ed, "/stock_preassess_",filename,".rds"))
+mse_runs <- readRDS(file=paste0("data-generated/mse_results/",ed, "/mse_projection_",filename,".rds"))
+
+stock_full <- FLCore::iter(sims[[1]][["stock"]],j)
+stock <- FLCore::trim(stock_full, year=((length(stock_full@catch)-(ts-1)):length(stock_full@catch)))
+
+nyear_proj = proj_yr
+
+bbmsy_pre_all <- stock_preassess$bbmsy_pre_COM
+bbmsy_pre_ens <-filter(bbmsy_pre_all, method == "Ensemble")
+
+stock_proj_TAC4010 <- mse_runs$stock_proj_TAC4010
+stock_proj_HR4010 <-  mse_runs$stock_proj_HR4010
+stock_proj_TACsw <- mse_runs$stock_proj_TACsw
+stock_proj_HRsw <-  mse_runs$stock_proj_HRsw
+stock_proj_BAU <- mse_runs$stock_proj_BAU
+
+years = (60-(ts-1)):(60)
+years_mgmt = (60-(ts-1)):(60+proj_yr)
+#years = (length(stock@catch)-(ts-1)):length(stock@catch)
+
+name = sp_lookup$Name[match(sp,sp_lookup$Symbol)]
+
+bbmsy_pre_COM <- stock_preassess$bbmsy_pre_COM %>%
+	dplyr::rename(bbmsy_q50 = BBmsy, year = Year)
+cmsy_pre_fit_bbmsy <- stock_preassess$cmsy_summary
+comsir_pre_fit_bbmsy <- stock_preassess$comsir_summary 
+mprm_pre_fit_bbmsy <- stock_preassess$mprm_summary 
+
+
+#### Setting HCR values
+params <- data.frame(filename, sp, ts, ed, j, mse_runs$param_comp)
+
+true_refpts = mse_runs$true_refpts
+		
+K_sim <- an(true_refpts["virgin", "biomass"])
+Bmsy_true <- an(true_refpts["msy", "biomass"])
+Fmsy_sim <- an(true_refpts["msy", "harvest"])
+Msy_sim <- an(true_refpts["msy", "yield"])
+
+bbmsy_vec <- seq(0, 2.5, by = 0.05)
+
+####4010 HCRs
+BBmsy_trig <- 0.8
+BBmsy_lim <- 0.2 
+
+Fmsy_est <- dplyr::filter(params, Model == "estimated") %>% select(Fmsy) %>% an()
+Ymsy_est <- dplyr::filter(params, Model == "estimated") %>% select(Ymsy) %>% an()
+Fmsy_true <- dplyr::filter(params, Model == "true") %>% select(Fmsy) %>% an()
+Ymsy_true <- dplyr::filter(params, Model == "true") %>% select(Ymsy) %>% an()
+
+BBmsy_current_est <- dplyr::filter(params, Model == "estimated") %>% select(BBmsy_current) %>% an()
+BBmsy_current_true <- dplyr::filter(params, Model == "true") %>% select(BBmsy_current) %>% an()
+
+HR_4010_est <- dplyr::filter(params, Model == "estimated") %>% select(HR_4010) %>% an()
+HR_4010_true <- dplyr::filter(params, Model == "true") %>% select(HR_4010) %>% an()
+
+TAC_4010_est <- dplyr::filter(params, Model == "estimated") %>% select(TAC_4010) %>% an()
+TAC_4010_true <- dplyr::filter(params, Model == "true") %>% select(TAC_4010) %>% an()
+
+
+##Calculating 4010 HCRs HR 
+hr_4010_vec_est <- HCR_4010(yaxis_msy = Fmsy_est* buffer, HCR_trig = BBmsy_trig, HCR_lim = BBmsy_lim,
+																		HCR_curr = bbmsy_vec)
+
+hr_4010_vec_true <- HCR_4010(yaxis_msy = Fmsy_true* buffer, HCR_trig = BBmsy_trig, HCR_lim = BBmsy_lim,
+																		HCR_curr = bbmsy_vec)
+
+##Calculating 4010HCRs TAC
+
+catch_4010_vec_est <- HCR_4010(yaxis_msy = Ymsy_est* buffer, HCR_trig = BBmsy_trig, HCR_lim = BBmsy_lim,
+																	 HCR_curr = bbmsy_vec)
+
+catch_4010_vec_true <- HCR_4010(yaxis_msy = Ymsy_true* buffer, HCR_trig = BBmsy_trig, HCR_lim = BBmsy_lim,
+																	 HCR_curr = bbmsy_vec)
+
+####setting stepwise HCRS
+BBmsy_lim_sw <- 0.6
+BBmsy_trig_sw <- 1.1
+ 
+HR_sw_est <- dplyr::filter(params, Model == "estimated") %>% select(HR_sw) %>% an()
+HR_sw_true <- dplyr::filter(params, Model == "true") %>% select(HR_sw) %>% an()
+
+TAC_sw_est <- dplyr::filter(params, Model == "estimated") %>% select(TAC_sw) %>% an()
+TAC_sw_true <- dplyr::filter(params, Model == "true") %>% select(TAC_sw) %>% an()
+
+ #Calculating stepwise HCRs - TRUE
+hr_sw_true_vec <- HCR_stepwise(yaxis_msy = Fmsy_true* buffer, HCR_trig_sw = BBmsy_trig_sw, HCR_lim_sw = BBmsy_lim_sw,
+												HCR_curr = bbmsy_vec)
+
+catch_sw_true_vec <- HCR_stepwise(yaxis_msy = Ymsy_true* buffer, HCR_trig_sw = BBmsy_trig_sw, HCR_lim_sw = BBmsy_lim_sw,
+												HCR_curr = bbmsy_vec)	 
+
+
+#Calculating stepwise HCRs for ensemble COM estimated data
+hr_sw_est_vec <- HCR_stepwise(yaxis_msy = Fmsy_est* buffer, HCR_trig_sw = BBmsy_trig_sw, HCR_lim_sw = BBmsy_lim_sw,
+																	 HCR_curr = bbmsy_vec)
+
+catch_sw_est_vec <- HCR_stepwise(yaxis_msy = Ymsy_est* buffer, HCR_trig_sw = BBmsy_trig_sw, HCR_lim_sw = BBmsy_lim_sw,
+																			HCR_curr = bbmsy_vec)
+
+#### plotting HCR values & MSE projections
+##BBMsy plot
+cols_dlm <- c(RColorBrewer::brewer.pal(4, "Dark2"))
+  trans1 <- "40"
+  trans2 <- "15"
+
+par(oma=c(0.1,0.1,2.2,0.1), mar=c(4, 4, 2.5, 1))
+layout(matrix(c(1,1,2,3,4,5), 3, 2, byrow = TRUE))
+#par(mfrow = c(2,4))
+
+cols_hcr <- c(RColorBrewer::brewer.pal(5, "Paired"))
+
+hcr_lookup <- data.frame(c("HR step","HR 4010","TAC step","TAC 4010","BAU"), 
+												 c( "HRsw", "HR4010", "TACsw","TAC4010", "BAU"),
+												 c("stock_proj_HRsw", "stock_proj_HR4010","stock_proj_TACsw", 
+												 	"stock_proj_TAC4010","stock_proj_BAU"),
+												 c(cols_hcr[1:5]))
+colnames(hcr_lookup) <- c('Label', 'HCR', "stock_proj","colour")
+
+for (hcr_rule in hcr_lookup$HCR) {
+ stock_proj <- eval(parse(text = as.character(hcr_lookup$stock_proj[match(hcr_rule,hcr_lookup$HCR)])))
+bbmsy <- FLQuant(stock(stock_proj)/Bmsy_true) %>%
+	as.data.frame() %>%
+	dplyr::select(year = year, bbmsy = data) 
+assign(paste0("bbmsy_",hcr_rule),bbmsy) 
+}
+
+bbmsy_true <- FLQuant(stock(stock)/Bmsy_true) %>%
+	as.data.frame() %>%
+	dplyr::select(year, data) %>%
+	dplyr::rename(BBmsy = data, Year = year)
+
+
+#png(filename = "plots/pres_preassess_CR_ens.pdf",width = 8, height = 6, unit = "in", res = 600)
+plot(years_mgmt, c(bbmsy_true$BBmsy,rep(NA, nyear_proj)), xlim = c(min(years),max(years_mgmt)),ylim = c(0,2.5),type = "n", xlab = "Year", ylab = "B/Bmsy", 
+		# main= paste0(sp_lookup$Name[sp_lookup$Symbol== sp]," - rep ", j),
+		cex.main = 1)
+
+lines(years,bbmsy_pre_COM$bbmsy_q50[bbmsy_pre_COM$method == "TRUE"], lty = 1, col = "black",lwd=2)
+lines(years,bbmsy_pre_ens$BBmsy, lty = 1, col = cols_dlm[2],lwd=2)
+
+lines(years,mprm_pre_fit_bbmsy$bbmsy_q50, lty = 1, col = cols_dlm[1],lwd=1.6)
+polygon(c(years, rev(years)), c(mprm_pre_fit_bbmsy$bbmsy_q25, rev(mprm_pre_fit_bbmsy$bbmsy_q75)), border = NA,	col = paste0(cols_dlm[1], trans1))
+polygon(c(years, rev(years)), c(mprm_pre_fit_bbmsy$bbmsy_q2.5, rev(mprm_pre_fit_bbmsy$bbmsy_q97.5)), border = NA, col = paste0(cols_dlm[1], trans2))
+
+lines(years,cmsy_pre_fit_bbmsy$bbmsy_q50, lty = 1, col = cols_dlm[4],lwd=1.6)
+polygon(c(years, rev(years)), c(cmsy_pre_fit_bbmsy$bbmsy_q25, rev(cmsy_pre_fit_bbmsy$bbmsy_q75)), border = NA,	col = paste0(cols_dlm[4], trans1))
+polygon(c(years, rev(years)), c(cmsy_pre_fit_bbmsy$bbmsy_q2.5, rev(cmsy_pre_fit_bbmsy$bbmsy_q97.5)), border = NA, col = paste0(cols_dlm[4], trans2))
+
+lines(years,comsir_pre_fit_bbmsy$bbmsy_q50, lty = 1, col = cols_dlm[3],lwd=1.6)
+polygon(c(years, rev(years)), c(comsir_pre_fit_bbmsy$bbmsy_q25, rev(comsir_pre_fit_bbmsy$bbmsy_q75)), border = NA,	col = paste0(cols_dlm[3], trans1))
+polygon(c(years, rev(years)), c(comsir_pre_fit_bbmsy$bbmsy_q2.5, rev(comsir_pre_fit_bbmsy$bbmsy_q97.5)), border = NA, col = paste0(cols_dlm[3], trans2))
+
+abline(h = 1, lty = 3)
+abline(v = max(years), lty = 2)
+
+legend("topleft", inset=0, legend = c("True", "mPRM", "CMSY", "COMSIR","Ensemble"), 
+			 col=c("black",cols_dlm[1],cols_dlm[4],cols_dlm[3],cols_dlm[2]), 
+			 lty = c(1,1,1,1,1),
+			 lwd = 2,
+			 horiz=FALSE,bty = "n",bg = "n")
+
+for (hcr_rule in hcr_lookup$HCR) {
+	colour = as.character(hcr_lookup$colour[match(hcr_rule,hcr_lookup$HCR)])
+	 bbmsy_out <- eval(parse(text = paste0("bbmsy_",hcr_rule)))
+lines(bbmsy_out$year,bbmsy_out$bbmsy, lty = 1, col = colour,lwd=1.8,cex = 1)
+}
+
+lines(bbmsy_pre_ens$Year,bbmsy_pre_ens$BBmsy,lty = 1, col = cols_dlm[2],lwd = 1.8)
+lines(bbmsy_true$Year, bbmsy_true$BBmsy, lty = 1, col = "Black", lwd = 1.8)
+
+legend("topright", inset=0, legend = c("Effort 4010", "Effort step","TAC 4010","TAC step", "BAU"), 
+			 col= cols_hcr,
+			 lty = c(1,1,1,1,1),
+			 horiz=FALSE,cex=1,bty = "n", bg = "n", lwd = 2)
+#dev.off()
+
+##HCR plots
+plot(bbmsy_vec, hr_4010_vec_true, type = "n", ylim = c(0, 1), yaxs = "i", xaxs = "i",xlab = "B/Bmsy", ylab = "Harvest rate", main = "HR 40-10")
+lines(bbmsy_vec,hr_4010_vec_est, col=cols_dlm[2],lwd = 1.8)
+lines(bbmsy_vec,hr_4010_vec_true, col="black", lwd = 1.8)
+points(BBmsy_current_true,HR_4010_true,col = "black", pch = 16)
+points(BBmsy_current_est,HR_4010_est, col = cols_dlm[2], pch = 17)
+abline(v = c(BBmsy_lim, BBmsy_trig), lty = 2)
+#abline(h = Fmsy_est, lty = 2)
+legend("topright", inset=0, legend = c("True", "Estimated"), 
+			 col=c("black",cols_dlm[2]), lty = c(1,1), horiz=FALSE,cex=1, bty = "n", bg = "n")
+#text(1,0.5,"40% K")
+#text(0.4,0.5,"10% K")
+mtext(paste0(sp_lookup$Name[sp_lookup$Symbol== sp]," - rep ", j), 3, line=0,  cex=1, outer=TRUE)
+
+plot(bbmsy_vec, hr_sw_true_vec, type = "n", ylim = c(0, 1), yaxs = "i", xaxs = "i",xlab = "B/Bmsy", ylab = "Harvest rate", main = "HR Stepwise")
+lines(bbmsy_vec,hr_sw_est_vec, col=cols_dlm[2],lwd = 1.8, type = "s")
+lines(bbmsy_vec,hr_sw_true_vec, col="black", lwd = 1.8, type = "s")
+points(BBmsy_current_true,HR_sw_true,col = "black", pch = 16)
+points(BBmsy_current_est,HR_sw_est, col = cols_dlm[2], pch = 17)
+abline(v = c(BBmsy_lim_sw, BBmsy_trig_sw), lty = 2)
+#abline(h = Fmsy_est, lty = 2)
+#legend("topright", inset=0, legend = c("True", "Ensemble"), 
+#			 col=c("black",cols_dlm[2]), lty = c(1,1), horiz=FALSE,cex=0.8, bty = "n", bg = "n")
+#text(1.1,0.5,"Bmsy")
+#text(0.6,0.5,"50% Bmsy")
+
+plot(bbmsy_vec, catch_4010_vec_true, type = "n", ylim = c(0, (max(catch_4010_vec_true,catch_4010_vec_est)+max(catch_4010_vec_true,catch_4010_vec_est)*0.3)), yaxs = "i", xaxs = "i",xlab = "B/Bmsy", ylab = "Catch (t)", main = "TAC 40-10")
+lines(bbmsy_vec,catch_4010_vec_est, col=cols_dlm[2],lwd= 1.8)
+lines(bbmsy_vec,catch_4010_vec_true, col="black", lwd= 1.8)
+points(BBmsy_current_true,TAC_4010_true,col = "black", pch = 16)
+
+points(BBmsy_current_est,TAC_4010_est, col = cols_dlm[2], pch = 17)
+abline(v = c(BBmsy_lim, BBmsy_trig), lty = 2)
+#abline(h = Fmsy_est, lty = 2)
+#legend("topright", inset=0, legend = c("True", "Ensemble"), 
+#			 col=c("black",cols_dlm[2]), lty = c(1,1), horiz=FALSE,cex=0.8, bty = "n", bg = "n")
+#text(1,1.1*max(catch_4010_vec_true,catch_4010_vec_est),"40% K")
+#text(0.4,1.1*max(catch_4010_vec_true,catch_4010_vec_est),"10% K")
+
+plot(bbmsy_vec, catch_sw_true_vec, type = "n", ylim = c(0, (max(catch_sw_true_vec,catch_sw_est_vec)+max(catch_sw_true_vec,catch_sw_est_vec)*0.3)), yaxs = "i", xaxs = "i",xlab = "B/Bmsy", ylab = "Catch (t)", main = "TAC Stepwise")
+lines(bbmsy_vec,catch_sw_est_vec, col=cols_dlm[2],lwd= 1.8, type = "s")
+lines(bbmsy_vec,catch_sw_true_vec, col="black", lwd= 1.8, type = "s")
+points(BBmsy_current_true,TAC_sw_true,col = "black", pch = 16)
+points(BBmsy_current_est,TAC_sw_est, col = cols_dlm[2], pch = 17)
+abline(v = c(BBmsy_lim_sw, BBmsy_trig_sw), lty = 2)
+#legend("topright", inset=0, legend = c("True", "Ensemble"), 
+#			 col=c("black",cols_dlm[2]), lty = c(1,1), horiz=FALSE,cex=0.8, bty = "n", bg = "n")
+#text(1.1,1.15*max(catch_sw_true_vec,catch_sw_est_vec),"Bmsy")
+#text(0.6,1.15*max(catch_sw_true_vec,catch_sw_est_vec),"50% Bmsy")
+
+
+cat ("\n\n")
+
+# rm(stock_proj)
+# rm(stock_preassess)
+# rm(stock_full)
+# rm(stock_proj_BAU)
+# rm(stock_proj_HR4010)
+# rm(stock_proj_TAC4010)
+# rm(stock_proj_TACsw)
+# rm(stock_proj_HRsw)
+}
+}
+#dev.off()
+```
+
+```{r flrPlots}
+##---------------------------------------------
+#check different HCRs after projection - ggplot
+##---------------------------------------------
+rep <- 4
+ts = 20
+ed = "OW"
+sp = "CR"
+
+#pdf(file=paste0("plots/projected-diagnostic-ggplot-", sp, "-TS",ts,"-",ed,"_true.pdf"),width =6, height = 5)
+pdf(file=paste0("plots/projected-diagnostic-ggplot-", sp, "-TS",ts,"-",ed,".pdf"),width =6, height = 5)
+ #par(mfrow=c(3,2))
+ #for (sp in species) {
+ 	for (j in rep) {
+	filename <- paste0(sp,"_TS",ts,"_",ed,"_rep",j)
+	
+#mse_runs <- readRDS(file=paste0("data-generated/mse_results/true/",ed, "/mse_projection_",filename,"_true.rds"))
+
+mse_runs <- readRDS(file=paste0("data-generated/mse_results/",ed,"/mse_projection_",filename,".rds"))
+	
+	name = sp_lookup$Name[match(sp,sp_lookup$Symbol)]
+	
+	message(filename)
+		
+results.vec <- FLStocks('BAU HCR'=mse_runs$stock_proj_BAU,'Effort HCR 4010'=mse_runs$stock_proj_HR4010,'TAC HCR 4010'=mse_runs$stock_proj_TAC4010, 'Effort HCR SW'=mse_runs$stock_proj_HRsw,'TAC HCR SW'=mse_runs$stock_proj_TACsw)
+diagnostic <- plot(results.vec) + geom_vline(xintercept = 60, linetype = "dashed") + ggtitle(filename)
+print(diagnostic)
+
+cat ("\n\n")
+	#rm(sims)
+	rm(mse_runs)
+	#rm(stock_preassess)
+ 	}
+ #}
+		dev.off()	
+
+```
+
+```{r plot_Fig3_example}
+rep <- 4
+ts = 20
+ed = "OW"
+sp = "CR"
+
+cols_dlm <- c(RColorBrewer::brewer.pal(4, "Dark2"))
+  trans1 <- "40"
+  trans2 <- "15"
+cols_hcr <- c(RColorBrewer::brewer.pal(5, "Paired"))
+
+
+hcr_lookup <- data.frame(c("Effort 40-10","Effort step","Catch 40-10","Catch step","BAU"), 
+												 c( "HR4010", "HRsw", "TAC4010","TACsw", "BAU"),
+												 c("stock_proj_HR4010", "stock_proj_HRsw","stock_proj_TAC4010", 
+												 	"stock_proj_TACsw","stock_proj_BAU"),
+												 c(cols_hcr[1:5]))
+colnames(hcr_lookup) <- c('Label', 'HCR', "stock_proj","colour")
+
+for (hcr_rule in hcr_lookup$HCR) {
+ stock_proj <- eval(parse(text = as.character(hcr_lookup$stock_proj[match(hcr_rule,hcr_lookup$HCR)])))
+bbmsy <- FLQuant(stock(stock_proj)/Bmsy_true) %>%
+	as.data.frame() %>%
+	dplyr::select(year = year, bbmsy = data) 
+assign(paste0("bbmsy_",hcr_rule),bbmsy) 
+}
+
+bbmsy_true <- FLQuant(stock(stock)/Bmsy_true) %>%
+	as.data.frame() %>%
+	dplyr::select(year, data) %>%
+	dplyr::rename(BBmsy = data, Year = year)
+
+
+pdf(file = "plots/Fig3_example_CR_OW_rep4.pdf",width = 8, height = 4)
+#png(filename = "plots/Fig3_example_CR_OW_rep4.png",width = 8, height = 4, unit = "in", res = 600)
+
+par(mfrow = c(1,1),oma=c(0.1,0.1,0.2,0.1), mar=c(4, 4, 0.5, 1), mgp = c(2,0.5,0))
+plot(years_mgmt, c(bbmsy_true$BBmsy,rep(NA, nyear_proj)), xlim = c(min(years),max(years_mgmt)),ylim = c(0,2.5),type = "n", xlab = "Year", ylab = expression("B/B"[MSY]), 
+		# main= paste0(sp_lookup$Name[sp_lookup$Symbol== sp]," - rep ", j),
+		cex.main = 1)
+
+lines(years,mprm_pre_fit_bbmsy$bbmsy_q50, lty = 1, col = cols_dlm[1],lwd=1.6)
+polygon(c(years, rev(years)), c(mprm_pre_fit_bbmsy$bbmsy_q25, rev(mprm_pre_fit_bbmsy$bbmsy_q75)), border = NA,	col = paste0(cols_dlm[1], trans1))
+polygon(c(years, rev(years)), c(mprm_pre_fit_bbmsy$bbmsy_q2.5, rev(mprm_pre_fit_bbmsy$bbmsy_q97.5)), border = NA, col = paste0(cols_dlm[1], trans2))
+
+lines(years,cmsy_pre_fit_bbmsy$bbmsy_q50, lty = 1, col = cols_dlm[4],lwd=1.6)
+polygon(c(years, rev(years)), c(cmsy_pre_fit_bbmsy$bbmsy_q25, rev(cmsy_pre_fit_bbmsy$bbmsy_q75)), border = NA,	col = paste0(cols_dlm[4], trans1))
+polygon(c(years, rev(years)), c(cmsy_pre_fit_bbmsy$bbmsy_q2.5, rev(cmsy_pre_fit_bbmsy$bbmsy_q97.5)), border = NA, col = paste0(cols_dlm[4], trans2))
+
+lines(years,comsir_pre_fit_bbmsy$bbmsy_q50, lty = 1, col = cols_dlm[3],lwd=1.6)
+polygon(c(years, rev(years)), c(comsir_pre_fit_bbmsy$bbmsy_q25, rev(comsir_pre_fit_bbmsy$bbmsy_q75)), border = NA,	col = paste0(cols_dlm[3], trans1))
+polygon(c(years, rev(years)), c(comsir_pre_fit_bbmsy$bbmsy_q2.5, rev(comsir_pre_fit_bbmsy$bbmsy_q97.5)), border = NA, col = paste0(cols_dlm[3], trans2))
+
+abline(h = 1, lty = 3)
+abline(v = max(years), lty = 2)
+abline(v = max(years)+5, lty = 4)
+
+legend("topleft", inset=0, legend = c("True", "mPRM", "CMSY", "COMSIR","Ensemble"), 
+			 col=c("black",cols_dlm[1],cols_dlm[4],cols_dlm[3],cols_dlm[2]), 
+			 lty = c(1,1,1,1,1),
+			 lwd = 2,
+			 horiz=FALSE,bty = "n",bg = "n")
+
+for (hcr_rule in hcr_lookup$HCR) {
+	colour = as.character(hcr_lookup$colour[match(hcr_rule,hcr_lookup$HCR)])
+	 bbmsy_out <- eval(parse(text = paste0("bbmsy_",hcr_rule)))
+lines(bbmsy_out$year,bbmsy_out$bbmsy, lty = 1, col = colour,lwd=1.8,cex = 1)
+}
+
+lines(bbmsy_pre_ens$Year,bbmsy_pre_ens$BBmsy,lty = 1, col = cols_dlm[2],lwd = 2)
+lines(bbmsy_true$Year, bbmsy_true$BBmsy, lty = 1, col = "Black", lwd = 2)
+
+legend("topright", inset=0, legend = c("Effort 40-10", "Effort step","Catch 40-10","Catch step", "BAU"), 
+			 col= cols_hcr,
+			 lty = c(1,1,1,1,1),
+			 horiz=FALSE,cex=1,bty = "n", bg = "n", lwd = 2)
+dev.off()
+
+
+```
+
+
+```{r presentation_plots}
+#run chunk above first for scenario you want
+
+#plot with just true simulation - preassessment
+png(filename = "plots/pres_preassess_CR_true_sim.png",width = 8, height = 6, unit = "in", res = 600)
+par(oma=c(0.1,0.1,0.1,0.1), mar=c(4, 4, 2.5, 1))
+plot(41:60, c(bbmsy_true$BBmsy), xlim = c(min(years),60),ylim = c(0,2.5),type = "n", xlab = "Year", ylab = "B/Bmsy", 
+		# main= paste0(sp_lookup$Name[sp_lookup$Symbol== sp]," - rep ", j),
+		cex.main = 1)
+
+lines(years,bbmsy_pre_COM$bbmsy_q50[bbmsy_pre_COM$method == "TRUE"], lty = 1, col = "black",lwd=2)
+#lines(years,bbmsy_pre_ens$BBmsy, lty = 1, col = cols_dlm[2],lwd=2)
+
+abline(h = 1, lty = 3)
+abline(v = max(years), lty = 2)
+
+legend("topleft", inset=0, legend = c("True", "mPRM", "CMSY", "COMSIR"), 
+			 col=c("black",cols_dlm[1],cols_dlm[4],cols_dlm[3]), 
+			 lty = c(1,1,1,1,1),
+			 lwd = 2,
+			 horiz=FALSE,bty = "n",bg = "n")
+dev.off()
+
+#plot with 3 models - preassessment
+png(filename = "plots/pres_preassess_CR_3COM.png",width = 8, height = 6, unit = "in", res = 600)
+par(oma=c(0.1,0.1,0.1,0.1), mar=c(4, 4, 2.5, 1))
+plot(41:60, c(bbmsy_true$BBmsy), xlim = c(min(years),60),ylim = c(0,2.5),type = "n", xlab = "Year", ylab = "B/Bmsy", 
+		# main= paste0(sp_lookup$Name[sp_lookup$Symbol== sp]," - rep ", j),
+		cex.main = 1)
+
+lines(years,bbmsy_pre_COM$bbmsy_q50[bbmsy_pre_COM$method == "TRUE"], lty = 1, col = "black",lwd=2)
+#lines(years,bbmsy_pre_ens$BBmsy, lty = 1, col = cols_dlm[2],lwd=2)
+
+lines(years,mprm_pre_fit_bbmsy$bbmsy_q50, lty = 1, col = cols_dlm[1],lwd=1.6)
+polygon(c(years, rev(years)), c(mprm_pre_fit_bbmsy$bbmsy_q25, rev(mprm_pre_fit_bbmsy$bbmsy_q75)), border = NA,	col = paste0(cols_dlm[1], trans1))
+polygon(c(years, rev(years)), c(mprm_pre_fit_bbmsy$bbmsy_q2.5, rev(mprm_pre_fit_bbmsy$bbmsy_q97.5)), border = NA, col = paste0(cols_dlm[1], trans2))
+
+lines(years,cmsy_pre_fit_bbmsy$bbmsy_q50, lty = 1, col = cols_dlm[4],lwd=1.6)
+polygon(c(years, rev(years)), c(cmsy_pre_fit_bbmsy$bbmsy_q25, rev(cmsy_pre_fit_bbmsy$bbmsy_q75)), border = NA,	col = paste0(cols_dlm[4], trans1))
+polygon(c(years, rev(years)), c(cmsy_pre_fit_bbmsy$bbmsy_q2.5, rev(cmsy_pre_fit_bbmsy$bbmsy_q97.5)), border = NA, col = paste0(cols_dlm[4], trans2))
+
+lines(years,comsir_pre_fit_bbmsy$bbmsy_q50, lty = 1, col = cols_dlm[3],lwd=1.6)
+polygon(c(years, rev(years)), c(comsir_pre_fit_bbmsy$bbmsy_q25, rev(comsir_pre_fit_bbmsy$bbmsy_q75)), border = NA,	col = paste0(cols_dlm[3], trans1))
+polygon(c(years, rev(years)), c(comsir_pre_fit_bbmsy$bbmsy_q2.5, rev(comsir_pre_fit_bbmsy$bbmsy_q97.5)), border = NA, col = paste0(cols_dlm[3], trans2))
+
+abline(h = 1, lty = 3)
+abline(v = max(years), lty = 2)
+
+legend("topleft", inset=0, legend = c("True", "mPRM", "CMSY", "COMSIR"), 
+			 col=c("black",cols_dlm[1],cols_dlm[4],cols_dlm[3]), 
+			 lty = c(1,1,1,1,1),
+			 lwd = 2,
+			 horiz=FALSE,bty = "n",bg = "n")
+dev.off()
+
+
+#plot with 3 models and ensemble- preassessment
+png(filename = "plots/pres_preassess_BC_ED03_ENS.png",width = 8, height = 6, unit = "in", res = 600)
+par(oma=c(0.1,0.1,0.1,0.1), mar=c(4, 4, 2.5, 1))
+plot(41:60, c(bbmsy_true$BBmsy), xlim = c(min(years),60),ylim = c(0,2.5),type = "n", xlab = "Year", ylab = "B/Bmsy", 
+		# main= paste0(sp_lookup$Name[sp_lookup$Symbol== sp]," - rep ", j),
+		cex.main = 1)
+
+lines(years,bbmsy_pre_COM$bbmsy_q50[bbmsy_pre_COM$method == "TRUE"], lty = 1, col = "black",lwd=2)
+lines(years,bbmsy_pre_ens$BBmsy, lty = 1, col = cols_dlm[2],lwd=3)
+
+lines(years,mprm_pre_fit_bbmsy$bbmsy_q50, lty = 1, col = cols_dlm[1],lwd=1.6)
+polygon(c(years, rev(years)), c(mprm_pre_fit_bbmsy$bbmsy_q25, rev(mprm_pre_fit_bbmsy$bbmsy_q75)), border = NA,	col = paste0(cols_dlm[1], trans1))
+polygon(c(years, rev(years)), c(mprm_pre_fit_bbmsy$bbmsy_q2.5, rev(mprm_pre_fit_bbmsy$bbmsy_q97.5)), border = NA, col = paste0(cols_dlm[1], trans2))
+
+lines(years,cmsy_pre_fit_bbmsy$bbmsy_q50, lty = 1, col = cols_dlm[4],lwd=1.6)
+polygon(c(years, rev(years)), c(cmsy_pre_fit_bbmsy$bbmsy_q25, rev(cmsy_pre_fit_bbmsy$bbmsy_q75)), border = NA,	col = paste0(cols_dlm[4], trans1))
+polygon(c(years, rev(years)), c(cmsy_pre_fit_bbmsy$bbmsy_q2.5, rev(cmsy_pre_fit_bbmsy$bbmsy_q97.5)), border = NA, col = paste0(cols_dlm[4], trans2))
+
+lines(years,comsir_pre_fit_bbmsy$bbmsy_q50, lty = 1, col = cols_dlm[3],lwd=1.6)
+polygon(c(years, rev(years)), c(comsir_pre_fit_bbmsy$bbmsy_q25, rev(comsir_pre_fit_bbmsy$bbmsy_q75)), border = NA,	col = paste0(cols_dlm[3], trans1))
+polygon(c(years, rev(years)), c(comsir_pre_fit_bbmsy$bbmsy_q2.5, rev(comsir_pre_fit_bbmsy$bbmsy_q97.5)), border = NA, col = paste0(cols_dlm[3], trans2))
+
+abline(h = 1, lty = 3)
+abline(v = max(years), lty = 2)
+
+legend("topleft", inset=0, legend = c("True", "mPRM", "CMSY", "COMSIR","Ensemble"), 
+			 col=c("black",cols_dlm[1],cols_dlm[4],cols_dlm[3],cols_dlm[2]), 
+			 lty = c(1,1,1,1,1),
+			 lwd = 2,
+			 horiz=FALSE,bty = "n",bg = "n")
+dev.off()
+
+## Plot of assessment and projectsions
+mgmt_yr = 5 #20 #5
+years_mgmt = (60-(ts-1)):(60+mgmt_yr)
+
+png(filename = "plots/pres_CR_OW_proj_MSE.png",width = 8, height = 6, units = "in",res = 600)
+plot(years_mgmt, c(bbmsy_true$BBmsy,rep(NA, mgmt_yr)), xlim = c(min(years),max(years_mgmt)),ylim = c(0,2.5),type = "n", xlab = "Year", ylab = "B/Bmsy", 
+		# main= paste0(sp_lookup$Name[sp_lookup$Symbol== sp]," - rep ", j),
+		cex.main = 1)
+
+lines(years,bbmsy_pre_COM$bbmsy_q50[bbmsy_pre_COM$method == "TRUE"], lty = 1, col = "black",lwd=2)
+lines(years,bbmsy_pre_ens$BBmsy, lty = 1, col = cols_dlm[2],lwd=3)
+
+# lines(years,mprm_pre_fit_bbmsy$bbmsy_q50, lty = 1, col = cols_dlm[1],lwd=1.6)
+# polygon(c(years, rev(years)), c(mprm_pre_fit_bbmsy$bbmsy_q25, rev(mprm_pre_fit_bbmsy$bbmsy_q75)), border = NA,	col = paste0(cols_dlm[1], trans1))
+# polygon(c(years, rev(years)), c(mprm_pre_fit_bbmsy$bbmsy_q2.5, rev(mprm_pre_fit_bbmsy$bbmsy_q97.5)), border = NA, col = paste0(cols_dlm[1], trans2))
+# 
+# lines(years,cmsy_pre_fit_bbmsy$bbmsy_q50, lty = 1, col = cols_dlm[4],lwd=1.6)
+# polygon(c(years, rev(years)), c(cmsy_pre_fit_bbmsy$bbmsy_q25, rev(cmsy_pre_fit_bbmsy$bbmsy_q75)), border = NA,	col = paste0(cols_dlm[4], trans1))
+# polygon(c(years, rev(years)), c(cmsy_pre_fit_bbmsy$bbmsy_q2.5, rev(cmsy_pre_fit_bbmsy$bbmsy_q97.5)), border = NA, col = paste0(cols_dlm[4], trans2))
+# 
+# lines(years,comsir_pre_fit_bbmsy$bbmsy_q50, lty = 1, col = cols_dlm[3],lwd=1.6)
+# polygon(c(years, rev(years)), c(comsir_pre_fit_bbmsy$bbmsy_q25, rev(comsir_pre_fit_bbmsy$bbmsy_q75)), border = NA,	col = paste0(cols_dlm[3], trans1))
+# polygon(c(years, rev(years)), c(comsir_pre_fit_bbmsy$bbmsy_q2.5, rev(comsir_pre_fit_bbmsy$bbmsy_q97.5)), border = NA, col = paste0(cols_dlm[3], trans2))
+
+abline(h = 1, lty = 3)
+abline(v = max(years), lty = 1)
+#abline(v = 65, lty = 2)
+
+legend("topleft", inset=0, legend = c("True", "Ensemble"), 
+			 col=c("black",cols_dlm[2]), 
+			 lty = c(1,1),
+			 lwd = 2,
+			 horiz=FALSE,bty = "n",bg = "n")
+
+for (hcr_rule in hcr_lookup$HCR) {
+	colour = as.character(hcr_lookup$colour[match(hcr_rule,hcr_lookup$HCR)])
+	 bbmsy_out <- eval(parse(text = paste0("bbmsy_",hcr_rule)))
+lines(bbmsy_out$year,bbmsy_out$bbmsy, lty = 1, col = colour,lwd=2,cex = 1)
+}
+
+lines(bbmsy_pre_ens$Year,bbmsy_pre_ens$BBmsy,lty = 1, col = cols_dlm[2],lwd = 1.8)
+lines(bbmsy_true$Year, bbmsy_true$BBmsy, lty = 1, col = "Black", lwd = 1.8)
+lines(years,bbmsy_pre_COM$bbmsy_q50[bbmsy_pre_COM$method == "TRUE"], lty = 1, col = "black",lwd=2)
+
+legend("topright", inset=0, legend = c("Effort 4010", "Effort step","TAC 4010","TAC step", "BAU"), 
+			 col=c(cols_hcr[2],cols_hcr[1],cols_hcr[4],cols_hcr[3],cols_hcr[5]),
+			 lty = c(1,1,1,1,1),
+			 horiz=FALSE,cex=1,bty = "n", bg = "n", lwd = 2)
+dev.off()
+
+```
+
+

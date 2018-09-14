@@ -1,0 +1,2594 @@
+---
+title: "07-performance-metrics"
+author: "Jessica Walsh"
+date: "4 July 2017"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, cache=FALSE, autodep = TRUE,
+  message = FALSE, warning = FALSE, fig.height = 6, fig.width = 10)
+```
+
+These results show the output from: 
+
+	* 5 havest control rules, 
+	* across 5 different species, 
+	* for two different harvest control rules (bioeconomic coupling and one-way trip) and 
+	* two lengths of management period (5 and 20 yrs)
+  * 3 HCR buffers
+
+Current n = 600 for each scenario
+
+We select a suitable buffer of HCR that ensures 10% BBmsy >0.25 and maximises catch (relative to MSY) across all species and harvest dynamics. If the best buffers differ across HCRs, we choose the most precautionary one.
+
+
+###Management objectives
+1.	Maintain median biomass at Bmsy 
+2.  Maintain 10% percentile biomass > 25%BBmsy
+3. 	Avoid collapsed fisheries (i.e. proportion of stocks B <25% Bmsy across full management period)
+3.	Maintain sustainable harvest rate (F/Fmsy) 
+4.  Avoid overfishing (i.e. median F > Fmsy)
+5.	Maximise yield (catch) during management period (total catch over management period relative to fishing at Fmsy)
+
+## Performance metrics
+
+### MSE- Box plots
+* B/Bmsy at end of management period of 5 years and 20 years (averaged over last 3 years)
+* F/Fmsy at the end of management period of 5 and 20 years (averaged over last 3 years)
+* Change in B/Bmsy at end of management period since beginning of management (for those above and below Bmsy) at 5 and 20 years
+* Change in F/Fmsy at end of management period since start of management (for those below and above Fmsy) at 5 and 20 years
+* Total or mean catch over management years (relative to virgin biomass, MSY or yield if fished at Fmsy)
+* St Dev of catches over management years (annual variation)
+
+\newpage
+
+```{r load_packages}
+library(ggplot2)
+library(knitr)
+library(FLash)
+library(FLa4a)
+library(FLAssess)
+library(dplyr)
+library(gridExtra)
+library(fmsb)
+
+sp_lookup = data.frame(c('BC','SA','PS','SJ','CR'),
+                       c('Rockfish','Sardine','Sole',
+                         'Tuna',	'Corvina'))
+colnames(sp_lookup)<-c('Symbol', 'Name')
+
+species <- factor(levels = c("BC","PS","SJ","SA","CR"))
+
+sce_lookup = data.frame(c("ED03","ED03","OW","OW"),
+												c("5", "20", "5","20"),
+												c("ED03_05yr", "ED03_20yr","OW_05yr", "OW_20yr"))
+colnames(sce_lookup) <- c("ED", "REA_YR", "scenario")
+
+scenario <- factor(c("ED03_5yr", "ED03_20yr","OW_5yr", "OW_20yr"))
+```
+
+```{r set_parameters}
+#iters = 1
+it = 1
+
+ts = 20					#TS	#length of catch time series before first assessment
+#proj_yr = 20 		# num years to project forward
+length_sim = 60 # num years in simulations
+
+SP <- c("BC","PS","CR","SA","SJ")
+ED <- c("ED03","OW")
+REA_YR = c("5", "20")		# time after first assessment until second assessment
+reps <- 1:600
+#TS <- c(20, 60)
+HCR <- c("HR4010","TAC4010","HRsw","TACsw","BAU")
+#REA = c("base", "ens_plus")
+BUF <- c(0.3, 0.4, 0.5, 0.6, 0.7, 0.75, 0.8, 0.9, 1)
+#BUF <- c(0.6, 0.7, 0.75, 0.8)
+
+```
+
+```{r make_metric_dataframe, eval = TRUE}
+# ##Create datafile that with all performance metrics across scenarios 
+#last created 31/1/2018
+#note this takes many hours to run
+
+## need to redo the data compiling if MSE has been run again
+if(!file.exists(file="../data-generated/HCR_target_vals_dat.rds")) {
+
+require(doParallel)
+registerDoParallel(cores = 3)
+getDoParWorkers()
+
+plyr::l_ply(SP, .paropts = list(.export=c("ED", "REA_YR", "reps","HCR", "BUF",
+																					"it", "ts", "length_sim"),
+																.packages = c("FLCore", "dplyr", "gridExtra")),
+						.fun = function(sp) {
+
+metrics <- data.frame(matrix(vector(), 0, 18, dimnames=list(c(), c("sp", "ts", "ed","j","rea_yr", "buffer", "ctrl","BBmsy_final", "prop_25bmsy", "prop_10bmsy","change_bbmsy",
+ "FFmsy_final", "prop_abovefmsy","change_ffmsy", "catch_mean", "catch_relFmsy_mean", "rel_catch_tot", "catch_sd"))),
+stringsAsFactors=F)
+
+HCR_target_vals <- data.frame(matrix(vector(),0, 16,dimnames = list(c(),c("filename_buf", "sp", "ts", "ed", "j","buffer", "Model","Bmsy","BBmsy_current","Fmsy","Ymsy","HR_curr","TAC_4010","HR_4010","TAC_sw", "HR_sw"))), stringsAsFactors=F)
+
+ref_pts <- list()
+for (ed in ED) {
+#for (sp in SP) {
+	load(paste0("data-raw/sims-", sp,"-",ed,".RData"))
+
+	for (buffer in BUF) {
+		buff_name <- buffer * 100
+		
+	for (j in reps) {
+		filename_buf <- paste0(sp,"_TS",ts,"_",ed,"_rep",j,"_buf",buff_name)
+		mse_runs <- readRDS(file=paste0("data-generated/mse_results/buffer",buff_name,"/",ed,"/mse_projection_",filename_buf,".rds"))
+
+		##collect param_comps for each filename
+		params <- data.frame(filename_buf, sp, ts, ed, j, buffer, mse_runs$param_comp)
+		
+		Bmsy_sim <- dplyr::filter(params, Model == "true") %>% dplyr::select(Bmsy) %>% an()
+		Fmsy_sim <- dplyr::filter(params, Model == "true") %>% dplyr::select(Fmsy) %>% an()
+		Msy_sim <- dplyr::filter(params, Model == "true") %>% dplyr::select(Ymsy) %>% an()
+		
+		HCR_target_vals <- bind_rows(HCR_target_vals,params)
+			
+
+		## Collect each performance metric for all scenarios
+		for (rea_yr in REA_YR) {
+		
+				mgmt_yrs = (length_sim+1):(length_sim+an(rea_yr))
+				years = (length_sim-(ts-1)):(length_sim+an(rea_yr))
+				
+			for (ctrl in HCR) {
+				
+			stock_proj <- eval(parse(text = paste0("mse_runs$stock_proj_", ctrl)))
+			stock_proj <- FLCore::iter(stock_proj,it) %>%
+			FLCore::trim(year=years)
+		
+			
+			## B/Bmsy status at end of management period (mean of last 3 years)
+			bbmsy <- FLQuant(stock(stock_proj)/Bmsy_sim) %>%
+			FLCore::as.data.frame() %>%
+			dplyr::select(year, data)
+			
+			BBmsy_final <- mean(bbmsy$data[(length(bbmsy$data)-2):length(bbmsy$data)],na.rm=TRUE)
+
+	## Prop of years that have a projected B/Bmsy below 25%Bmsy
+			prop_25bmsy <- sum(bbmsy$data[bbmsy$year==mgmt_yrs] < 0.25) / an(rea_yr) * 100
+			
+				## Prop of years that have a projected B/Bmsy below 10%Bmsy
+			prop_10bmsy <- sum(bbmsy$data[bbmsy$year==mgmt_yrs] < 0.10) / an(rea_yr) * 100
+
+			##Change in B/Bmsy since start of management
+			change_bbmsy <- bbmsy$data[bbmsy$year == max(years)] - bbmsy$data[bbmsy$year == (min(mgmt_yrs)-1)]  
+
+			## F/Fmsy status at end of management period (mean of last 3 years)
+			ffmsy <- FLQuant(fbar(stock_proj)/Fmsy_sim) %>%
+			FLCore::as.data.frame() %>%
+			dplyr::select(year, data)
+
+			FFmsy_final <- mean(ffmsy$data[(length(ffmsy$data)-2):length(ffmsy$data)],na.rm=TRUE)
+		
+			## F/Fmsy status (proportion of years where F/Fmsy is above Fmsy)
+			prop_abovefmsy <- sum(ffmsy$data[ffmsy$year==mgmt_yrs] > 1)/ an(rea_yr) * 100
+
+			##Change in F/Fmsy since start of management 
+			# (or should this be mean last 3 years - mean last 3 years before mgmt?)
+			change_ffmsy <- ffmsy$data[ffmsy$year == max(years)]- ffmsy$data[ffmsy$year == (min(mgmt_yrs)-1)] 
+
+			## Mean catch (across multiple iterations) per year in management period, relative to MSY
+			catch_msy <- FLQuant(catch(stock_proj)/Msy_sim) %>%
+			FLCore::as.data.frame() %>%
+		  dplyr::select(year, data)
+		  catch_mean <- mean(catch_msy$data[catch_msy$year==mgmt_yrs], na.rm=TRUE)
+
+		  ## Mean catch per year in management period, relative to fishing at Fmsy
+			#finding yield across management period if project forward with Fmsy
+			catch_Fmsy <- catch(mse_runs$stock_proj_Fmsy) %>% 
+				FLCore::trim(year=years) 
+
+			catch_relFmsy <- FLQuant(catch(stock_proj)/catch_Fmsy) %>%
+			FLCore::as.data.frame() %>%
+		  dplyr::select(year, data)
+		  catch_relFmsy_mean <- mean(catch_relFmsy$data[catch_relFmsy$year==mgmt_yrs], na.rm=TRUE)
+
+			## Total catch across all years in management period (per repitition), relative to virgin biomass
+			rel_catch_vB <- FLQuant(catch(stock_proj)/as.numeric(sims[[sp]]$lh["v"])) %>%
+			FLCore::as.data.frame() %>%
+			dplyr::select(year, data)
+			rel_catch_tot <- sum(rel_catch_vB$data[rel_catch_vB$year == mgmt_yrs], na.rm=TRUE)
+
+			## Annual variation in catches (standard deviation for each repition) over management period relative to msy
+			catch_sd <- sd(catch_msy$data[catch_msy$year==mgmt_yrs],	na.rm =TRUE)
+
+			out <- data.frame(sp, ts, ed, j, rea_yr, buffer, ctrl, BBmsy_final, prop_25bmsy, prop_10bmsy, change_bbmsy, FFmsy_final, prop_abovefmsy, change_ffmsy, catch_mean, catch_relFmsy_mean, rel_catch_tot, catch_sd)
+			
+	
+			metrics <- bind_rows(metrics,out)
+			rm(out)
+			
+			}
+		}
+			message(filename_buf)
+		}
+	}
+}
+saveRDS(metrics, file=paste0("data-generated/performance_metrics_dat_", sp,".rds"))
+saveRDS(HCR_target_vals, file=paste0("data-generated/HCR_target_vals_dat_", sp, ".rds"))
+						}, .parallel = TRUE)
+
+metrics_BC <- readRDS(paste0("data-generated/performance_metrics_dat_BC.rds"))
+metrics_CR <- readRDS(paste0("data-generated/performance_metrics_dat_CR.rds"))
+metrics_SA <- readRDS(paste0("data-generated/performance_metrics_dat_SA.rds"))
+metrics_SJ <- readRDS(paste0("data-generated/performance_metrics_dat_SJ.rds"))
+metrics_PS <- readRDS(paste0("data-generated/performance_metrics_dat_PS.rds"))
+
+metrics_full <- bind_rows(metrics_BC, metrics_CR) %>%
+	bind_rows(metrics_SA) %>% bind_rows(metrics_SJ) %>%
+	bind_rows(metrics_PS)
+
+saveRDS(metrics_full, paste0("data-generated/performance_metrics_dat.rds"))
+metrics <- metrics_full
+
+HCR_target_BC <- readRDS(paste0("data-generated/HCR_target_vals_dat_BC.rds"))
+HCR_target_CR <- readRDS(paste0("data-generated/HCR_target_vals_dat_CR.rds"))
+HCR_target_SA <- readRDS(paste0("data-generated/HCR_target_vals_dat_SA.rds"))
+HCR_target_SJ <- readRDS(paste0("data-generated/HCR_target_vals_dat_SJ.rds"))
+HCR_target_PS <- readRDS(paste0("data-generated/HCR_target_vals_dat_PS.rds"))
+
+HCR_target_full <- bind_rows(HCR_target_BC, HCR_target_CR) %>%
+	bind_rows(HCR_target_SA) %>% bind_rows(HCR_target_SJ) %>%
+	bind_rows(HCR_target_PS)
+
+saveRDS(HCR_target_full, paste0("data-generated/HCR_target_vals_dat.rds"))
+HCR_target_vals <- HCR_target_full
+
+} else {
+HCR_target_vals <- readRDS(file=paste0("../data-generated/HCR_target_vals_dat.rds"))
+metrics <- readRDS(paste0("../data-generated/performance_metrics_dat.rds"))
+}
+
+```
+
+
+
+```{r performance_metrics_plots_setup}
+##Create plots for each metric
+metrics <- readRDS(paste0("data-generated/performance_metrics_dat.rds"))
+
+metrics$ctrl <- factor(metrics$ctrl,levels=(c("HR4010", "HRsw", "TAC4010",  "TACsw","BAU")))
+metrics <- mutate(metrics, scenario = paste0(ed,"_",rea_yr,"yr"))
+metrics$scenario <- factor(metrics$scenario, levels =c("ED03_5yr","ED03_20yr","OW_5yr","OW_20yr"))
+metrics$sp <- factor(metrics$sp, levels = c("BC","CR","PS","SA","SJ"),labels = c("Rockfish","Corvina","Sole","Sardine","Tuna"))
+
+
+plot_performance_metrics_together <- function(dat) {
+ggplot(dat, aes(as.factor(ctrl), perf_metric)) + 
+geom_boxplot(aes(fill=factor(ctrl))) +
+	scale_fill_brewer(palette="Paired") +
+	#scale_fill_manual (values=cols) +
+	xlab("Harvest Control Rule") +
+	facet_grid(scenario~sp) +
+		theme_bw() +
+	theme(axis.text=element_text(size=10),
+        axis.title=element_text(size=14),
+				#axis.title.y=element_text(margin=margin(10,10,0,0)),
+				#axis.title.x=element_text(margin=margin(10,8,0,0)),
+				axis.text.x=element_text(angle=90, vjust=0.4,hjust=1),
+				plot.title=element_text(size=18),
+				legend.title = element_blank())
+}
+
+###BBmsy current ###
+metrics_plot <- select(metrics,sp,ts,ed,j,rea_yr,buffer,ctrl,scenario,BBmsy_final) %>%
+	rename(perf_metric = BBmsy_final)
+pdf(file = paste0("plots/performance_metrics_plots_current_BBmsy_together.pdf"), width = 16, height = 9)
+for (i in 1:length(BUF)) {
+dat_temp <- subset(metrics_plot, buffer == BUF[i])
+plotx <-	plot_performance_metrics_together(dat=dat_temp) +
+	geom_hline(yintercept = 1, linetype = "dashed") +
+	ggtitle(paste("Current B/Bmsy status",BUF[i])) +
+		ylab("B/Bmsy (mean of last 3 yrs)") + 
+	coord_cartesian(ylim = c(0, 4)) 
+	print(plotx)
+}
+dev.off()
+	
+# ###Change in BBmsy###
+metrics_plot <- select(metrics,sp,ts,ed,j,rea_yr,buffer,ctrl,scenario,change_bbmsy) %>%
+	rename(perf_metric = change_bbmsy)
+pdf(file = paste0("plots/performance_metrics_plots_change_BBmsy_together.pdf"), width = 16, height = 9)
+for (i in 1:length(BUF)) {
+dat_temp <- subset(metrics_plot, buffer == BUF[i])
+plotx <- plot_performance_metrics_together(dat=dat_temp) +
+	ggtitle(paste("Change in B/Bmsy since first assessment",BUF[i])) +
+	ylab("Change in B/Bmsy") +
+	geom_hline(yintercept = 0, linetype = "dashed") +
+	coord_cartesian(ylim = c(-1, 1)) 
+	print(plotx)
+}
+dev.off()
+
+### Prop of years that stocks were overfished (<25%Bmsy)
+pdf(file = paste0("plots/performance_metrics_plots_yrs_overfished_together.pdf"), width = 16, height = 9)
+metrics_plot <- select(metrics,sp,ts,ed,j,rea_yr,buffer,ctrl,scenario,prop_25bmsy) %>%
+	rename(perf_metric = prop_25bmsy)
+for (i in 1:length(BUF)) {
+dat_temp <- subset(metrics_plot, buffer == BUF[i])
+plotx <-	plot_performance_metrics_together(dat = dat_temp) +
+	ggtitle(paste("Prop. years overfished (<25%Bmsy)",BUF[i])) +
+	ylab("Prop. years below 25% Bmsy")
+print(plotx)
+}
+dev.off()
+
+### Prop of years that stocks were collapsed (<10%Bmsy)
+# metrics_plot <- select(metrics,sp,ts,ed,j,rea_yr,buffer,ctrl,scenario,prop_10bmsy) %>%
+# 	rename(perf_metric = prop_10bmsy)
+# for (i in 1:length(BUF)) {
+# dat_temp <- subset(metrics_plot, buffer == BUF[i])
+# plotx <-	plot_performance_metrics_together(dat=dat_temp) +
+# 	ggtitle(paste("Prop. years with collapsed stock",BUF[i])) +
+# 	ylab("Prop. years below 10% Bmsy")
+# print(plotx)
+# }
+
+### FFmsy at end of management period
+metrics_plot <- select(metrics,sp,ts,ed,j,rea_yr,buffer,ctrl,scenario,FFmsy_final) %>%
+	rename(perf_metric = FFmsy_final)
+pdf(file = paste0("plots/performance_metrics_plots_current_FFmsy_together.pdf"), width = 16, height = 9)
+for (i in 1:length(BUF)) {
+dat_temp <- subset(metrics_plot, buffer == BUF[i])
+plotx <-	plot_performance_metrics_together(dat= dat_temp) +
+	geom_hline(yintercept = 1, linetype = "dashed") +
+	ggtitle(paste("F/Fmsy status - end of management period",BUF[i])) +
+	ylab("F/Fmsy (mean of last 3 yrs)")
+print(plotx)
+}
+dev.off()
+
+#check why there is not variation in OW BAU scenario.
+# metrics_FFmsy_OW <- filter(metrics, scenario == "OW_5yr") 
+# ggplot(metrics_FFmsy_OW, aes(FFmsy_final)) +
+# 	geom_histogram() + 
+# 	facet_wrap(as.factor(sp)~ as.factor(ctrl))
+# 
+# metrics_FFmsy_OW_BAU <- filter(metrics_FFmsy_OW, ctrl == "BAU")
+# ggplot(metrics_FFmsy_OW_BAU, aes(FFmsy_final)) +
+# 	geom_histogram(binwidth = 0.01) + 
+# 	facet_wrap(~as.factor(sp))
+# summary(metrics_FFmsy_OW_BAU$FFmsy_final)
+# # > summary(metrics_FFmsy_OW_BAU$FFmsy_final)
+# #    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+# #  1.226   1.527   1.636   1.712   1.843   2.137 
+# metrics_FFmsy_BAU_tuna <- filter(metrics, ctrl == "BAU", sp == "Tuna")
+# ggplot(metrics_FFmsy_BAU_tuna, aes(FFmsy_final)) +
+# 	geom_histogram(binwidth = 0.01) + 
+# 	facet_wrap(~as.factor(sp))
+
+# ###Change in FFmsy###
+metrics_plot <- select(metrics,sp,ts,ed,j,rea_yr,buffer,ctrl,scenario,change_ffmsy) %>%
+	rename(perf_metric = change_ffmsy)
+pdf(file =  paste0("plots/performance_metrics_plots_change_FFmsy_together.pdf"), width = 16, height = 9)
+for (i in 1:length(BUF)) {
+dat_temp <- subset(metrics_plot, buffer == BUF[i])
+plotx <- plot_performance_metrics_together(dat=dat_temp) +
+	ggtitle(paste("Change in F/Fmsy since management",BUF[i])) +
+	ylab("Change in F/Fmsy") +
+	geom_hline(yintercept = 0, linetype = "dashed")
+print(plotx)
+}
+dev.off()
+
+### Prop of years that stocks with overfishing (>Fmsy)
+metrics_plot <- select(metrics,sp,ts,ed,j,rea_yr,buffer,ctrl,scenario,prop_abovefmsy) %>%
+	rename(perf_metric = prop_abovefmsy)
+pdf(file =  paste0("plots/performance_metrics_plots_prop_yrs_overfishing_together.pdf"), width = 16, height = 9)
+for (i in 1:length(BUF)) {
+dat_temp <- subset(metrics_plot, buffer == BUF[i])
+plotx <- plot_performance_metrics_together(dat=dat_temp) +
+	ggtitle(paste("Prop. years overfishing during management",BUF[i])) +
+	ylab("Prop. years above F/Fmsy")
+print(plotx)
+}	
+dev.off()
+
+# ###Total catch over management period relative to virgin biomass ###
+# metrics_plot <- select(metrics,sp,ts,ed,j,rea_yr,buffer,ctrl,scenario,rel_catch_tot) %>%
+# 	rename(perf_metric = rel_catch_tot)
+# for (i in 1:length(BUF)) {
+# dat_temp <- subset(metrics_plot, buffer == BUF[i])
+# plotx <- plot_performance_metrics_together(dat=dat_temp) +
+# 	ggtitle(paste("Total catch, relative to virgin biomass",BUF[i])) +
+# 	geom_hline(yintercept = 1, linetype = "dashed") +
+# 	ylab("Total catch during management") +
+# 	coord_cartesian(ylim = c(0, 2)) 
+# print(plotx)
+# }
+# 
+# ###mean annual catch during management period, relative to MSY###
+# metrics_plot <- select(metrics,sp,ts,ed,j,rea_yr,buffer,ctrl,scenario,catch_mean) %>%
+# 	rename(perf_metric = catch_mean)
+# #pdf(file = paste0("plots/performance_metrics_plots_catch_mean_together.pdf"), width = 16, height = 9)
+# #png(file = paste0("plots/performance_metrics_plots_catch_mean_together.png"), width = 10, height = 6, units = "in",res=600)
+# for (i in 1:length(BUF)) {
+# dat_temp <- subset(metrics_plot, buffer == BUF[i])
+# plotx <-	plot_performance_metrics_together(dat= dat_temp) +
+# 	ggtitle(paste("Mean catch/year, relative to MSY",BUF[i])) +
+# 	geom_hline(yintercept = 1, linetype = "dashed") +
+# 	ylab("Mean catch/year during management, relative to MSY") #+
+# 	coord_cartesian(ylim = c(0, 3)) 
+# print(plotx) 
+# }
+# dev.off()
+
+###mean annual catch during management period, relative to yield at Fmsy###
+metrics_plot <- select(metrics,sp,ts,ed,j,rea_yr,buffer,ctrl,scenario,catch_relFmsy_mean) %>%
+	rename(perf_metric = catch_relFmsy_mean)
+pdf(file = paste0("plots/performance_metrics_plots_catchFmsy_mean_together.pdf"), width = 16, height = 9)
+for (i in 1:length(BUF)) {
+dat_temp <- subset(metrics_plot, buffer == BUF[i])
+plotx <-	plot_performance_metrics_together(dat= dat_temp) +
+	ggtitle(paste("Mean catch/year, relative to Fmsy", BUF[i])) +
+	geom_hline(yintercept = 1, linetype = "dashed") +
+	ylab("Mean catch/year during management, relative to yield at Fmsy") +
+	coord_cartesian(ylim = c(0, 3)) 
+print(plotx)
+}
+dev.off()
+
+###St dev of catches over management period ####
+metrics_plot <- select(metrics,sp,ts,ed,j,rea_yr,buffer,ctrl,scenario,catch_sd) %>%
+	rename(perf_metric = catch_sd)
+pdf(file = paste0("plots/performance_metrics_plots_catch_sd_together.pdf"), width = 16, height = 9)
+#png(file = paste0("plots/performance_metrics_plots_catch_sd_together.png"), width = 10, height = 6, units = "in",res=600)
+for (i in 1:length(BUF)) {
+dat_temp <- subset(metrics_plot, buffer == BUF[i])
+plotx <-	plot_performance_metrics_together(dat=dat_temp) +
+	ggtitle(paste("Annual variation in catches during mamagement", BUF[i])) +
+	ylab("St dev of catches during management") +
+	coord_cartesian(ylim = c(0, 2)) 
+print(plotx)
+}
+dev.off()
+
+```
+
+
+##Summary tables
+
+```{r summary_tables, eval=TRUE}
+metrics <- readRDS("data-generated/performance_metrics_dat.rds") 
+metrics$sp <- factor(metrics$sp, levels = c("BC","CR","PS","SA","SJ"),labels = c("Rockfish","Corvina","Sole","Sardine","Tuna"))
+
+dat <- metrics %>%
+	filter(buffer != 0.75) %>%
+	group_by(sp, ed, rea_yr, buffer, ctrl) %>%
+	summarise(prop_stocks_above_bmsy = sum(BBmsy_final>=1)/length(BBmsy_final),
+						prop_stocks_lng_trm_not_overfished = mean(100 - prop_25bmsy),
+						av_bbmsy = median(BBmsy_final),
+						pc05_bbmsy = quantile(BBmsy_final,probs = 0.05),
+						pc10_bbmsy = quantile(BBmsy_final,probs = 0.10),
+						av_ffmsy = median(FFmsy_final),
+						prop_lng_trm_no_overfishing = median(100 - prop_abovefmsy),
+						#prop_stocks_overfishing_end = sum(FFmsy_final>1) /length(FFmsy_final),
+						#prop_stocks_no_overfishing_end = sum(FFmsy_final<1) /length(FFmsy_final),
+						mean_catch_low = sum(catch_mean<0.8)/length(catch_mean),
+						av_catch_msy = median(catch_mean),
+						av_catch_Fmsy = median(catch_relFmsy_mean),
+						av_catch_variation =median(catch_sd))
+
+# ggplot(dat, aes(prop_stocks_above_bmsy)) +
+# 	geom_density(aes(colour=rea_yr)) +
+# 	facet_grid(sp~buffer)
+# 
+# ggplot(dat, aes(prop_stocks_lng_trm_not_overfished)) +
+# 	geom_density(aes(colour=rea_yr)) +
+# 	facet_grid(sp~buffer)
+# 
+# ggplot(dat, aes(prop_lng_trm_no_overfishing)) +
+# 	geom_density(aes(colour=rea_yr)) +
+# 	facet_grid(sp~buffer)
+
+##testing which buffers work best.
+#averaged over OW and ED03 and SP
+# after 5 years
+buffer_dat <- group_by(dat, rea_yr, buffer, ctrl) %>%
+	summarise(mean_bbmsy = mean(av_bbmsy),
+						pc05_bbmsy = mean(pc05_bbmsy),
+						pc10_bbmsy = mean(pc10_bbmsy),
+						mean_ffmsy = mean(av_ffmsy),
+						av_catch = mean(av_catch_Fmsy))
+
+##finding buffers that satisfy objectives (5th%ile is > 25% Bmsy and maximises yield)
+best_buffer_5pc <- filter(buffer_dat, pc05_bbmsy > 0.25) %>%
+	group_by(rea_yr, ctrl) %>%
+	filter(av_catch == max(av_catch)) 
+best_buffer_5pc
+#   rea_yr buffer   ctrl mean_bbmsy pc05_bbmsy pc10_bbmsy mean_ffmsy  av_catch
+#    <chr>  <dbl>  <chr>      <dbl>      <dbl>      <dbl>      <dbl>     <dbl>
+# 1     20    0.5 HR4010  0.9647888  0.2550591  0.3736223  0.7414624 0.8831615
+# 2     20    0.6   HRsw  1.1548714  0.2621788  0.4129019  0.5079156 0.7508932
+# 3      5    0.3  TACsw  0.9042309  0.2503885  0.3614545  0.1729603 0.2966608
+# 4      5    0.5 HR4010  0.7012107  0.2626826  0.3279900  0.7438806 0.8170077
+# 5      5    0.7   HRsw  0.7336992  0.2549362  0.3237767  0.5978587 0.7088006
+
+##checking performance if raise bbmsy threshold to ensure 10th% is >25%Bmsy
+best_buffer_10pc <- filter(buffer_dat, pc10_bbmsy > 0.25) %>%
+	group_by(rea_yr, ctrl) %>%
+	filter(av_catch == max(av_catch)) 
+best_buffer_10pc
+#   rea_yr buffer    ctrl mean_bbmsy pc05_bbmsy pc10_bbmsy mean_ffmsy  av_catch
+#    <chr>  <dbl>   <chr>      <dbl>      <dbl>      <dbl>      <dbl>     <dbl>
+# 1     20    0.3 TAC4010  1.5147276 0.11478057  0.2985146  0.1643675 0.4793542
+# 2     20    0.4   TACsw  1.6053422 0.07314829  0.2513008  0.1081385 0.3484234
+# 3     20    0.6  HR4010  0.8632964 0.19981102  0.2948620  0.8938103 0.9171874
+# 4     20    0.8    HRsw  1.0175272 0.16286201  0.2831107  0.6802327 0.8230510
+# 5      5    0.3 TAC4010  0.8271087 0.19324024  0.2741103  0.3820540 0.5690471
+# 6      5    0.5   TACsw  0.8098148 0.19198082  0.2676810  0.3219809 0.4944738
+# 7      5    0.6     BAU  0.5508837 0.20174238  0.2514890  1.3776888 1.1092845
+# 8      5    0.8  HR4010  0.5968251 0.20770386  0.2635500  1.1916825 1.0621619
+# 9      5    1.0    HRsw  0.6616064 0.21263730  0.2751441  0.8513876 0.8799186
+
+### Now separating out results at species level - 0.25 BBmsy
+#averaged over OW and ED03 
+buffer_dat_sp <- group_by(dat, sp, buffer, ctrl, rea_yr) %>%
+	summarise(mean_bbmsy = mean(av_bbmsy),
+						pc05_bbmsy = mean(pc05_bbmsy),
+						pc10_bbmsy = mean(pc10_bbmsy),
+						prop_end_above_bmsy = mean(prop_stocks_above_bmsy),
+						prop_lngtrm_not_overfished = mean(prop_stocks_lng_trm_not_overfished),
+						prop_lngtrm_no_overfishing = mean(prop_lng_trm_no_overfishing),
+						mean_ffmsy = mean(av_ffmsy),
+						av_catch = mean(av_catch_Fmsy))
+buffer_dat_sp
+
+best_buffer_sp_05 <- filter(buffer_dat_sp, pc05_bbmsy > 0.25) %>%
+	group_by(sp, rea_yr, ctrl) %>%
+	filter(av_catch == max(av_catch)) 
+
+table_best_buffer_05 <- dplyr::select(best_buffer_sp_05, rea_yr, sp, buffer, ctrl) %>%
+	tidyr::spread(ctrl, buffer)
+table_best_buffer_05
+
+#   rea_yr    sp   BAU HR4010  HRsw TAC4010 TACsw
+#  *  <chr> <chr> <dbl>  <dbl> <dbl>   <dbl> <dbl>
+#  1     20    BC    NA    0.5   0.5      NA   0.3
+#  2     20    CR    NA    0.4   0.5      NA    NA
+#  3     20    PS   0.3    0.5   0.6      NA   0.3
+#  4     20    SA    NA    0.5   0.6      NA    NA
+#  5     20    SJ    NA    0.4   0.7     0.4   0.5
+#  6      5    BC    NA    0.6   0.9      NA   0.4
+#  7      5    CR    NA     NA   0.3      NA    NA
+#  8      5    PS    NA    0.6   0.8      NA   0.4
+#  9      5    SA    NA    0.6   0.7      NA    NA
+# 10      5    SJ    NA    0.4   0.7      NA   0.3
+
+### Now separating out results at species level - 10th%ile > 0.25 BBmsy
+#averaged over OW and ED03 
+best_buffer_sp_10 <- filter(buffer_dat_sp, pc10_bbmsy > 0.25) %>%
+	group_by(sp, rea_yr, ctrl) %>%
+	filter(av_catch == max(av_catch)) 
+
+table_best_buffer_10 <- dplyr::select(best_buffer_sp_10, rea_yr, sp, buffer, ctrl) %>%
+	tidyr::spread(ctrl, buffer)
+table_best_buffer_10
+
+#   rea_yr    sp   BAU HR4010  HRsw TAC4010 TACsw
+#  *  <chr> <chr> <dbl>  <dbl> <dbl>   <dbl> <dbl>
+#  1     20    BC    NA    0.6   0.8     0.3   0.4
+#  2     20    CR    NA    0.6   0.7     0.3   0.3
+#  3     20    PS   0.3    0.6   0.8     0.3   0.3
+#  4     20    SA    NA    0.6   0.8      NA    NA
+#  5     20    SJ    NA    0.5   0.8     0.6   1.0
+#  6      5    BC   0.6    1.0   1.0     0.4   0.7
+#  7      5    CR    NA    0.6   1.0      NA   0.4
+#  8      5    PS   0.4    0.9   1.0     0.4   0.6
+#  9      5    SA   0.8    0.8   1.0      NA   0.3
+# 10      5    SJ    NA    0.8   1.0     0.4   0.9
+
+#plotting some trade-offs
+
+theme_sleek_buffer <- function(base_size = 12, base_family = "") {
+	half_line <- base_size/2
+	theme_light(base_size = 12, base_family = "") +
+		theme(
+			panel.grid.major = element_blank(),
+			panel.grid.minor = element_blank(),
+			axis.ticks.length = unit(half_line/2.2, "pt"),
+			strip.background = element_rect(fill = NA, colour = NA),
+			strip.text.x = element_text(size = 12, colour = "grey20"),
+			strip.text.y = element_text(size = 12, colour = "grey20"),
+			axis.text = element_text(colour = "grey30"),
+			axis.title = element_text(colour = "grey30"),
+			legend.title = element_text(colour = "grey30", size = rel(0.9)),
+			panel.border = element_rect(fill = NA, colour = "grey70", size = 1),
+			legend.key.size = unit(0.9, "lines"),
+			legend.text = element_text(size = rel(0.7), colour = "grey30"),
+			legend.key = element_rect(colour = NA, fill = NA),
+			legend.background = element_rect(colour = NA, fill = NA)
+		)
+}
+
+buffer_dat_sp$HCR <- factor(buffer_dat_sp$ctrl,levels=c("HR4010", "HRsw", "TAC4010", "TACsw", "BAU"))  
+buffer_dat_sp$rea_yr <- factor(buffer_dat_sp$rea_yr, levels = c("5", "20"))
+
+png(file = paste0("plots/FigS9_buffer_plots_pc10bbmsy_av_catch.png"), width = 10, height = 7, units = "in", res= 600)
+#pdf(file = paste0("plots/FigS9_buffer_plots_pc10bbmsy_av_catch.pdf"), width = 10, height = 7)
+ggplot(buffer_dat_sp, aes(pc10_bbmsy,av_catch)) +
+	geom_point(aes(colour = HCR, size = buffer)) +
+	scale_colour_brewer(palette="Paired") +
+	scale_size_continuous(range = c(1,3)) +
+	facet_grid(sp~rea_yr) +
+	xlab(expression("10th percentile B/B"[MSY])) +
+	ylab(expression("Mean annual yield relative to F"[MSY])) +
+	geom_vline(xintercept = 0.25, linetype = "dashed") +
+	geom_vline(xintercept = 0.5, linetype = "dashed", colour = "grey") +
+	theme_sleek_base() +
+			theme(axis.text=element_text(size=10),
+        axis.title=element_text(size=14),
+			  #axis.text.x=element_text(angle=90, vjust=0.4,hjust=1),
+				plot.title=element_text(size=18),
+			#	legend.title = element_blank(),
+			 legend.position="right")
+dev.off()
+
+
+ggplot(buffer_dat_sp, aes(prop_lngtrm_not_overfished, av_catch)) +
+	geom_point(aes(colour = ctrl, size = buffer)) +	
+	scale_size_continuous(range = c(1,3)) +
+	facet_grid(sp~rea_yr) +
+	geom_vline(xintercept = 1, linetype = "dashed") +
+	geom_vline(xintercept = 0.5, linetype = "dashed", colour = "grey") +
+	theme_bw()
+ggsave("plots/buffer_plots_not_overfished_av_catch.pdf")
+
+ggplot(buffer_dat_sp, aes(prop_end_above_bmsy,av_catch)) +
+	geom_point(aes(colour = ctrl, size = buffer)) +
+	scale_size_continuous(range = c(1,3)) +
+	facet_grid(sp~rea_yr) +
+	theme_bw()
+ggsave("plots/buffer_plots_av_prop_above_bmsy_av_catch.pdf")
+
+
+##Comparing with perfect information ##
+metrics_true <- readRDS("data-generated/performance_metrics_true_dat.rds") 
+dat_true <- metrics_true %>%
+	filter(buffer != 0.75) %>%
+	group_by(sp, ed, rea_yr, buffer, ctrl) %>%
+	summarise(prop_stocks_above_bmsy = sum(BBmsy_final>=1)/length(BBmsy_final),
+						prop_stocks_lng_trm_not_overfished = mean(100 - prop_25bmsy),
+						av_bbmsy = median(BBmsy_final),
+						pc05_bbmsy = quantile(BBmsy_final, probs = 0.05),
+						pc10_bbmsy = quantile(BBmsy_final, probs = 0.10),
+						av_ffmsy = median(FFmsy_final),
+						prop_lng_trm_no_overfishing = median(100 - prop_abovefmsy),
+						#prop_stocks_overfishing_end = sum(FFmsy_final>1) /length(FFmsy_final),
+						#prop_stocks_no_overfishing_end = sum(FFmsy_final<1) /length(FFmsy_final),
+						mean_catch_low = sum(catch_mean<0.8)/length(catch_mean),
+						av_catch_msy = median(catch_mean),
+						av_catch_Fmsy = median(catch_relFmsy_mean),
+						av_catch_variation =median(catch_sd))
+
+#Across all species # true information
+buffer_dat_true <- group_by(dat_true, rea_yr, buffer, ctrl) %>%
+	summarise(mean_bbmsy = mean(av_bbmsy),
+						pc05_bbmsy = mean(pc05_bbmsy),
+						pc10_bbmsy = mean(pc10_bbmsy),
+						prop_end_above_bmsy = mean(prop_stocks_above_bmsy),
+						prop_lngtrm_not_overfished = mean(prop_stocks_lng_trm_not_overfished),
+						prop_lngtrm_no_overfishing = mean(prop_lng_trm_no_overfishing),
+						mean_ffmsy = mean(av_ffmsy),
+						av_catch = mean(av_catch_Fmsy))
+
+#buffer_dat_true
+
+best_buffer_true_05 <- filter(buffer_dat_true, pc05_bbmsy > 0.25) %>%
+	group_by(rea_yr, ctrl) %>%
+	filter(av_catch == max(av_catch)) 
+best_buffer_true_05
+
+#   rea_yr buffer    ctrl mean_bbmsy pc05_bbmsy pc10_bbmsy prop_end_above_bmsy
+#    <chr>  <dbl>   <chr>      <dbl>      <dbl>      <dbl>               <dbl>
+# 1     20    0.7 TAC4010  1.4627086  0.2645377  0.4890750           0.7213333
+# 2     20    0.8  HR4010  0.9203479  0.2731623  0.3542224           0.4438333
+# 3     20    1.0    HRsw  1.3221333  0.2916229  0.4262335           0.6306667
+# 4     20    1.0   TACsw  1.6661352  0.3074123  0.5719867           0.7753333
+# 5      5    0.5 TAC4010  0.8840773  0.2717508  0.3827761           0.3815000
+# 6      5    1.0  HR4010  0.6111608  0.2507686  0.3035265           0.1588333
+# 7      5    1.0    HRsw  0.7765365  0.2946777  0.3709069           0.2835000
+# 8      5    1.0   TACsw  0.8877938  0.2814833  0.3803107           0.3796667
+# # ... with 4 more variables: prop_lngtrm_not_overfished <dbl>,
+# #   prop_lngtrm_no_overfishing <dbl>, mean_ffmsy <dbl>, av_catch <dbl>
+
+best_buffer_true_10 <- filter(buffer_dat_true, pc10_bbmsy > 0.25) %>%
+	group_by(rea_yr, ctrl) %>%
+	filter(av_catch == max(av_catch)) 
+best_buffer_true_10
+#   rea_yr buffer    ctrl mean_bbmsy pc05_bbmsy pc10_bbmsy prop_end_above_bmsy
+#    <chr>  <dbl>   <chr>      <dbl>      <dbl>      <dbl>               <dbl>
+# 1     20    0.8 TAC4010  1.3241687  0.1490689  0.3114763           0.6496667
+# 2     20    1.0  HR4010  0.7924735  0.1894345  0.2683901           0.3673333
+# 3     20    1.0    HRsw  1.3221333  0.2916229  0.4262335           0.6306667
+# 4     20    1.0   TACsw  1.6661352  0.3074123  0.5719867           0.7753333
+# 5      5    0.6     BAU  0.5553806  0.2047947  0.2545302           0.1443333
+# 6      5    1.0  HR4010  0.6111608  0.2507686  0.3035265           0.1588333
+# 7      5    1.0    HRsw  0.7765365  0.2946777  0.3709069           0.2835000
+# 8      5    1.0 TAC4010  0.6947187  0.2019846  0.2587105           0.2641667
+# 9      5    1.0   TACsw  0.8877938  0.2814833  0.3803107           0.3796667
+
+### Now separating out results at species level - 0.25 BBmsy - TRUE
+#averaged over OW and ED03 
+buffer_dat_sp_true <- group_by(dat_true, sp, buffer, ctrl, rea_yr) %>%
+	summarise(mean_bbmsy = mean(av_bbmsy),
+						pc05_bbmsy = mean(pc05_bbmsy),
+						pc10_bbmsy = mean(pc10_bbmsy),
+						mean_ffmsy = mean(av_ffmsy),
+						av_catch = mean(av_catch_Fmsy))
+
+best_buffer_sp_05_true <-	filter(buffer_dat_sp_true, pc05_bbmsy > 0.25) %>%
+	group_by(sp, rea_yr, ctrl) %>%
+	filter(av_catch == max(av_catch)) 
+
+table_best_buffer_05_true <- dplyr::select(best_buffer_sp_05_true, rea_yr, sp, buffer, ctrl) %>%
+	tidyr::spread(ctrl, buffer)
+table_best_buffer_05_true
+#    rea_yr    sp   BAU HR4010  HRsw TAC4010 TACsw
+#  *  <chr> <chr> <dbl>  <dbl> <dbl>   <dbl> <dbl>
+#  1     20    BC    NA    0.8   1.0     0.6   0.9
+#  2     20    CR    NA    0.8   1.0     0.6   0.9
+#  3     20    PS   0.7    1.0   1.0     0.8   1.0
+#  4     20    SA    NA    0.6   0.7      NA   0.6
+#  5     20    SJ    NA     NA   0.5     0.7   1.0
+#  6      5    BC    NA    1.0   1.0     0.8   1.0
+#  7      5    CR    NA    0.9   1.0      NA   1.0
+#  8      5    PS   0.7    1.0   1.0     1.0   1.0
+#  9      5    SA    NA    0.8   1.0      NA   0.7
+# 10      5    SJ    NA     NA   0.8     0.5   1.0
+
+best_buffer_sp_10_true <- filter(buffer_dat_sp_true, pc10_bbmsy > 0.25) %>%
+	group_by(sp, rea_yr, ctrl) %>%
+	filter(av_catch == max(av_catch)) 
+
+table_best_buffer_10_true <- dplyr::select(best_buffer_sp_10_true, rea_yr, sp, buffer, ctrl) %>%
+	tidyr::spread(ctrl, buffer)
+table_best_buffer_10_true
+#   rea_yr    sp   BAU HR4010  HRsw TAC4010 TACsw
+#  *  <chr> <chr> <dbl>  <dbl> <dbl>   <dbl> <dbl>
+#  1     20    BC    NA    1.0   1.0     0.7   1.0
+#  2     20    CR    NA    1.0   1.0     0.7   1.0
+#  3     20    PS   0.7    1.0   1.0     0.9   1.0
+#  4     20    SA    NA    0.6   0.9     0.5   0.7
+#  5     20    SJ    NA    0.5   0.5     1.0   1.0
+#  6      5    BC   0.6    1.0   1.0     1.0   1.0
+#  7      5    CR    NA    1.0   1.0     1.0   1.0
+#  8      5    PS   0.7    1.0   1.0     1.0   1.0
+#  9      5    SA   0.9    1.0   1.0     0.6   1.0
+# 10      5    SJ    NA    1.0   0.8     1.0   1.0
+
+#subsetting data for the radar plots
+#here we select the best buffers for each HCR, using the buffer that achieves BBmsy 10th%ile > 0.25Bmsy per species, and maximised yield, over 20 years, using perfect informatio (i.e. table_best_buffer_10_true)
+#this is to account for long lived species to see an effect of HCRs
+best_buffer_dat <- best_buffer_sp_10_true %>%
+	filter(rea_yr == "20" & ctrl != "BAU") %>% ungroup() %>%
+	group_by(ctrl) %>% 
+	summarise(buffer = min(buffer))
+#need to add BAU back in with a 100% buffer because BAU is not affected by buffers
+buffer = 1
+ctrl = "BAU"
+bau_buffer <- data.frame(buffer, ctrl)
+
+best_buffer_dat <- bind_rows(best_buffer_dat, bau_buffer)
+rm( buffer, ctrl)
+best_buffer_dat
+#      ctrl buffer
+# 1  HR4010    0.5
+# 2    HRsw    0.5
+# 3 TAC4010    0.5
+# 4   TACsw    0.7
+# 5     BAU    1.0
+
+write.csv(best_buffer_dat, file = "data-generated/summary_stats/best_buffer_dat.csv")
+
+#selecting all performance metrics for each species, at the best buffer for each HCR
+#filter out metrics data.frame to only have best buffers for each HCR
+metrics_buffer <- right_join(metrics, best_buffer_dat) %>% 
+	mutate(ctrl_buffer = paste(ctrl, buffer)) %>%
+	mutate(scenario = paste0(ed,"_",rea_yr,"yr"))
+metrics_buffer$ctrl_buffer <- factor(metrics_buffer$ctrl_buffer,levels=(unique(metrics_buffer$ctrl_buffer)))
+metrics_buffer$scenario <- factor(metrics_buffer$scenario, levels =c("ED03_5yr","ED03_20yr","OW_5yr","OW_20yr"))
+saveRDS(metrics_buffer, file = "data-generated/summary_stats/metrics_best_buffer.rds")
+
+#data.frame for radar plots
+tab_best_dat_buffer <- right_join(dat, best_buffer_dat) %>% 
+	mutate(ctrl_buffer = paste(ctrl, buffer)) %>%
+	mutate(scenario = paste0(ed,"_",rea_yr,"yr"))
+tab_best_dat_buffer$ctrl_buffer <- factor(tab_best_dat_buffer$ctrl_buffer,levels=((unique(tab_best_dat_buffer$ctrl_buffer))))
+tab_best_dat_buffer$scenario <- factor(tab_best_dat_buffer$scenario, levels =c("ED03_5yr","ED03_20yr","OW_5yr","OW_20yr"))
+saveRDS(tab_best_dat_buffer, file = "data-generated/summary_stats/radar_dat_best_buffer.rds")
+
+##TRUE metrics - best buffer
+# filter out metrics_true data.frame to only have best buffers for each HCR ##
+metrics_true_buffer <- right_join(metrics_true, best_buffer_dat) %>% 
+	mutate(ctrl_buffer = paste(ctrl, buffer)) %>%
+	mutate(scenario = paste0(ed,"_",rea_yr,"yr"))
+metrics_true_buffer$ctrl_buffer <- factor(metrics_true_buffer$ctrl_buffer,levels=(unique(metrics_true_buffer$ctrl_buffer)))
+metrics_true_buffer$scenario <- factor(metrics_true_buffer$scenario, levels =c("ED03_5yr","ED03_20yr","OW_5yr","OW_20yr"))
+saveRDS(metrics_true_buffer, file = "data-generated/summary_stats/metrics_true_best_buffer.rds")
+
+#data.frame for radar plots
+tab_best_dat_true_buffer <- right_join(dat_true, best_buffer_dat) %>% 
+	mutate(ctrl_buffer = paste(ctrl, buffer)) %>%
+	mutate(scenario = paste0(ed,"_",rea_yr,"yr"))
+tab_best_dat_true_buffer$ctrl_buffer <- factor(tab_best_dat_true_buffer$ctrl_buffer,levels=(unique(tab_best_dat_true_buffer$ctrl_buffer)))
+tab_best_dat_true_buffer$scenario <- factor(tab_best_dat_true_buffer$scenario, levels =c("ED03_5yr","ED03_20yr","OW_5yr","OW_20yr"))
+saveRDS(tab_best_dat_true_buffer, file = "data-generated/summary_stats/radar_dat_true_best_buffer.rds")
+
+```
+
+```{r summary_tables_UR_bias}
+#note: the metrics_UR dataframe is compiled using the script: 06b_performance_metrics-UR.R
+rm(list= ls())
+metrics_UR <- readRDS("data-generated/performance_metrics_dat_UR.rds") 
+best_buffer_dat <- read.csv(file = "data-generated/summary_stats/best_buffer_dat.csv")
+
+dat_UR <- metrics_UR %>%
+	filter(buffer != 0.75) %>%
+	group_by(sp, ed, rea_yr, buffer, ctrl) %>%
+	summarise(prop_stocks_above_bmsy = sum(BBmsy_final>=1)/length(BBmsy_final),
+						prop_stocks_lng_trm_not_overfished = median(100 - prop_25bmsy),
+						av_bbmsy = median(BBmsy_final),
+						pc05_bbmsy = quantile(BBmsy_final, probs = 0.05),
+						pc10_bbmsy = quantile(BBmsy_final, probs = 0.10),
+						av_ffmsy = median(FFmsy_final),
+						prop_lng_trm_no_overfishing = median(100 - prop_abovefmsy),
+						#prop_stocks_overfishing_end = sum(FFmsy_final>1) /length(FFmsy_final),
+						#prop_stocks_no_overfishing_end = sum(FFmsy_final<1) /length(FFmsy_final),
+						mean_catch_low = sum(catch_mean<0.8)/length(catch_mean),
+						av_catch_msy = median(catch_mean),
+						av_catch_Fmsy = median(catch_relFmsy_mean),
+						av_catch_variation =median(catch_sd))
+
+##testing which buffers work best.
+#averaged over OW and ED03 and SP
+# after 5 years
+
+buffer_dat_UR <- group_by(dat_UR, rea_yr, buffer, ctrl) %>%
+	summarise(mean_bbmsy = mean(av_bbmsy),
+						pc05_bbmsy = mean(pc05_bbmsy),
+						pc10_bbmsy = mean(pc10_bbmsy),
+						mean_ffmsy = mean(av_ffmsy),
+						av_catch = mean(av_catch_Fmsy))
+
+best_buffer_05_UR <- filter(buffer_dat_UR, pc05_bbmsy > 0.25) %>%
+	group_by(rea_yr, ctrl) %>%
+	filter(av_catch == max(av_catch)) 
+best_buffer_05_UR
+#   rea_yr buffer    ctrl mean_bbmsy pc05_bbmsy pc10_bbmsy mean_ffmsy  av_catch
+#    <chr>  <dbl>   <chr>      <dbl>      <dbl>      <dbl>      <dbl>     <dbl>
+# 1     20    0.3 TAC4010  1.6586254  0.3411623  0.5053344 0.10659934 0.3401221
+# 2     20    0.3   TACsw  1.7592594  0.4157490  0.7620359 0.06016288 0.2164836
+# 3     20    0.5  HR4010  0.9252732  0.2539099  0.3604362 0.77366628 0.8911476
+# 4     20    0.5    HRsw  1.1414469  0.2900312  0.4254617 0.49115579 0.7284235
+# 5      5    0.3   TACsw  0.9328563  0.2842060  0.4006337 0.14729412 0.2517388
+# 6      5    0.4  HR4010  0.7332480  0.2763289  0.3447752 0.61512352 0.7296294
+# 7      5    0.6    HRsw  0.7090910  0.2571441  0.3265516 0.59128953 0.6994250
+
+##checking performance if raise bbmsy threshold to ensure 10th% is >50%Bmsy
+best_buffer_10_UR <- filter(buffer_dat_UR, pc10_bbmsy > 0.25) %>%
+	group_by(rea_yr, ctrl) %>%
+	filter(av_catch == max(av_catch)) 
+best_buffer_10_UR
+#   rea_yr buffer    ctrl mean_bbmsy pc05_bbmsy pc10_bbmsy mean_ffmsy  av_catch
+#    <chr>  <dbl>   <chr>      <dbl>      <dbl>      <dbl>      <dbl>     <dbl>
+# 1     20    0.4 TAC4010  1.5259690  0.1695452  0.3455362  0.1592751 0.4404098
+# 2     20    0.5   TACsw  1.5952807  0.1675912  0.3074452  0.1147474 0.3488005
+# 3     20    0.6  HR4010  0.8263119  0.1891411  0.2842305  0.9293731 0.9270541
+# 4     20    0.7    HRsw  0.9728157  0.1663070  0.2759041  0.6901068 0.8140277
+# 5      5    0.4 TAC4010  0.8396936  0.1949817  0.2866384  0.3679068 0.5354497
+# 6      5    0.7   TACsw  0.7789100  0.1774931  0.2524150  0.4252479 0.5895413
+# 7      5    0.8  HR4010  0.5760316  0.1976333  0.2516868  1.2297017 1.0744908
+# 8      5    0.9     BAU  0.5500711  0.2021908  0.2508823  1.3832807 1.1083322
+# 9      5    1.0    HRsw  0.6030533  0.2007236  0.2561318  0.9847424 0.9415981
+
+
+### Now separating out results at species level - 0.25 BBmsy
+#averaged over OW and ED03 
+buffer_dat_sp_UR <- group_by(dat_UR, sp, buffer, ctrl, rea_yr) %>%
+	summarise(mean_bbmsy = mean(av_bbmsy),
+						pc05_bbmsy = mean(pc05_bbmsy),
+						pc10_bbmsy = mean(pc10_bbmsy),
+						prop_end_above_bmsy = mean(prop_stocks_above_bmsy),
+						prop_lngtrm_not_overfished = mean(prop_stocks_lng_trm_not_overfished),
+						prop_lngtrm_no_overfishing = mean(prop_lng_trm_no_overfishing),
+						mean_ffmsy = mean(av_ffmsy),
+						av_catch = mean(av_catch_Fmsy))
+buffer_dat_sp_UR
+
+best_buffer_sp_05_UR <- filter(buffer_dat_sp_UR, pc05_bbmsy > 0.25) %>%
+	group_by(sp, rea_yr, ctrl) %>%
+	filter(av_catch == max(av_catch)) 
+
+table_best_buffer_05_UR <- select(best_buffer_sp_05_UR, rea_yr, sp, buffer, ctrl) %>%
+	tidyr::spread(ctrl, buffer)
+table_best_buffer_05_UR
+#   rea_yr    sp   BAU HR4010  HRsw TAC4010 TACsw
+#  *  <chr> <chr> <dbl>  <dbl> <dbl>   <dbl> <dbl>
+#  1     20    BC    NA    0.4   0.5     0.3   0.3
+#  2     20    CR    NA    0.5   0.5     0.4   0.6
+#  3     20    PS   0.6    0.5   0.5     0.3   0.3
+#  4     20    SA    NA    0.4   0.4      NA    NA
+#  5     20    SJ    NA    0.4   0.6     0.7   1.0
+#  6      5    BC    NA    0.5   0.8      NA   0.4
+#  7      5    CR    NA     NA   0.3      NA   0.3
+#  8      5    PS   0.8    0.6   0.7     0.3   0.4
+#  9      5    SA    NA    0.5   0.5      NA    NA
+# 10      5    SJ    NA    0.4   0.5     0.3   0.6
+
+### Now separating out results at species level - 0.25 BBmsy
+#averaged over OW and ED03 
+best_buffer_sp_10_UR <- filter(buffer_dat_sp_UR, pc10_bbmsy > 0.25) %>%
+	group_by(sp, rea_yr, ctrl) %>%
+	filter(av_catch == max(av_catch)) 
+
+table_best_buffer_10_UR <- select(best_buffer_sp_10_UR, rea_yr, sp, buffer, ctrl) %>%
+	tidyr::spread(ctrl, buffer)
+table_best_buffer_10_UR
+#   rea_yr    sp   BAU HR4010  HRsw TAC4010 TACsw
+#  *  <chr> <chr> <dbl>  <dbl> <dbl>   <dbl> <dbl>
+#  1     20    BC    NA    0.6   0.7     0.3   0.4
+#  2     20    CR    NA    0.6   0.7     0.6   0.7
+#  3     20    PS   0.8    0.6   0.7     0.4   0.4
+#  4     20    SA    NA    0.6   0.6      NA   0.3
+#  5     20    SJ    NA    0.5   1.0     1.0   1.0
+#  6      5    BC   0.8    1.0   1.0     0.5   0.7
+#  7      5    CR    NA    0.7   1.0     0.6   1.0
+#  8      5    PS   0.8    0.9   1.0     0.4   0.6
+#  9      5    SA    NA    0.7   0.8     0.3   0.4
+# 10      5    SJ    NA    0.7   1.0     0.9   1.0
+
+
+#plotting some trade-offs
+ggplot(buffer_dat_sp_UR, aes(pc10_bbmsy,av_catch)) +
+	geom_point(aes(colour = ctrl)) +
+	facet_grid(sp~rea_yr) +
+	geom_vline(xintercept = 0.25, linetype = "dashed") +
+	geom_vline(xintercept = 0.5, linetype = "dashed", colour = "grey") +
+	theme_bw()
+ggsave("plots/buffer_plots_pc10bbmsy_av_catch_UR.pdf")
+
+
+#selecting all performance metrics for each species, at the best buffer for each HCR based on true information
+#filter out metrics data.frame to only have best buffers for each HCR
+metrics_UR_buffer <- right_join(metrics_UR, best_buffer_dat[,2:3]) %>% 
+	mutate(ctrl_buffer = paste(ctrl, buffer)) %>%
+	mutate(scenario = paste0(ed,"_",rea_yr,"yr"))
+metrics_UR_buffer$ctrl_buffer <- factor(metrics_UR_buffer$ctrl_buffer, levels=(unique(metrics_UR_buffer$ctrl_buffer)))
+metrics_UR_buffer$scenario <- factor(metrics_UR_buffer$scenario, levels =c("ED03_5yr","ED03_20yr","OW_5yr","OW_20yr"))
+saveRDS(metrics_UR_buffer, file = "data-generated/summary_stats/metrics_UR_best_buffer.rds")
+
+#data.frame_UR for radar plots with best buffers
+tab_best_dat_UR_buffer <- right_join(dat_UR, best_buffer_dat[,2:3]) %>% 
+	mutate(ctrl_buffer = paste(ctrl, buffer)) %>%
+	mutate(scenario = paste0(ed,"_",rea_yr,"yr"))
+tab_best_dat_UR_buffer$ctrl_buffer <- factor(tab_best_dat_UR_buffer$ctrl_buffer,levels=(unique(tab_best_dat_UR_buffer$ctrl_buffer)))
+tab_best_dat_UR_buffer$scenario <- factor(tab_best_dat_UR_buffer$scenario, levels =c("ED03_5yr","ED03_20yr","OW_5yr","OW_20yr"))
+saveRDS(tab_best_dat_UR_buffer, file = "data-generated/summary_stats/radar_dat_UR_best_buffer.rds")
+
+```
+
+```{r tables_true_vs_dlm_perf}
+rm(list = ls())
+dat_best_buffer <- readRDS(file = "data-generated/summary_stats/radar_dat_best_buffer.rds") %>% ungroup ()
+dat_true_best_buffer <- readRDS(file = "data-generated/summary_stats/radar_dat_true_best_buffer.rds")  %>% ungroup ()
+
+new_names_COM <- paste0(names(dat_best_buffer),"_COM")
+names(dat_best_buffer) <- new_names_COM
+new_names_TRUE <- paste0(names(dat_true_best_buffer),"_true")
+names(dat_true_best_buffer) <- new_names_TRUE
+
+dat_best_buffer_join <- bind_cols(dat_best_buffer, dat_true_best_buffer) %>%
+	select(sp_true, ed_true, rea_yr_true, scenario_true, ctrl_buffer_true, prop_stocks_above_bmsy_COM:av_catch_variation_COM, prop_stocks_above_bmsy_true:av_catch_variation_true)
+
+prop_error <- dat_best_buffer_join %>%
+	group_by(sp_true, ed_true, rea_yr_true, scenario_true, ctrl_buffer_true) %>%
+	summarise(PE_prop_above_bbmsy = (prop_stocks_above_bmsy_COM - prop_stocks_above_bmsy_true)/prop_stocks_above_bmsy_true,
+						PE_av_bbmsy = (av_bbmsy_COM - av_bbmsy_true)/av_bbmsy_true,
+						PE_lg_tm_nt_overfished = (prop_stocks_lng_trm_not_overfished_COM - prop_stocks_lng_trm_not_overfished_true) / prop_stocks_lng_trm_not_overfished_true,
+						PE_pc10_bbmsy = (pc10_bbmsy_COM - pc10_bbmsy_true)/pc10_bbmsy_true,
+						PE_lg_tm_nt_overfishing = (prop_lng_trm_no_overfishing_COM - prop_lng_trm_no_overfishing_true)/ prop_lng_trm_no_overfishing_true,
+						PE_av_catch_Fmsy = (av_catch_Fmsy_COM - av_catch_Fmsy_true)/ av_catch_Fmsy_true,
+						error_prop_above_bbmsy = prop_stocks_above_bmsy_COM - prop_stocks_above_bmsy_true, 
+						error_av_bbmsy = av_bbmsy_COM - av_bbmsy_true,
+						error_lg_tm_nt_overfished = prop_stocks_lng_trm_not_overfished_COM - prop_stocks_lng_trm_not_overfished_true,
+						error_pc10_bbmsy = pc10_bbmsy_COM - pc10_bbmsy_true, 
+						error_lg_tm_nt_overfishing = prop_lng_trm_no_overfishing_COM - prop_lng_trm_no_overfishing_true,
+						error_av_catch_Fmsy = av_catch_Fmsy_COM - av_catch_Fmsy_true)
+
+ggplot(prop_error, aes(PE_prop_above_bbmsy, PE_lg_tm_nt_overfishing)) +
+	geom_point(aes(colour = ed_true, shape = sp_true, size = PE_av_catch_Fmsy)) +
+	#	scale_x_continuous(limits = c(0, 3)) +
+	facet_grid(ctrl_buffer_true ~ rea_yr_true) +
+	geom_vline(xintercept=0,linetype="dotted")+
+	geom_hline(yintercept=0,linetype="dotted")
+
+ggplot(prop_error, aes(PE_prop_above_bbmsy, PE_av_catch_Fmsy)) +
+	geom_point(aes(colour = ed_true, shape = sp_true)) +
+	facet_grid(ctrl_buffer_true ~ rea_yr_true) +
+	geom_vline(xintercept=0,linetype="dotted") +
+	geom_hline(yintercept=0,linetype="dotted") +
+	scale_y_continuous(limits = c(-1, 3)) 
+
+ggplot(prop_error, aes(PE_pc10_bbmsy, PE_av_catch_Fmsy)) +
+	geom_point(aes(colour = ed_true, shape = sp_true)) +
+	facet_grid(ctrl_buffer_true ~ rea_yr_true) +
+	geom_vline(xintercept=0,linetype="dotted") +
+	geom_hline(yintercept=0,linetype="dotted") +
+	scale_y_continuous(limits = c(-1, 3)) 
+
+##Table with raw results from COMs using best buffers 
+av_results_sp <- group_by(dat_best_buffer, sp_COM, scenario_COM, ctrl_buffer_COM) %>%
+	summarise(data = "result",
+		av_pc10_bbmsy = round(mean(pc10_bbmsy_COM), digits = 2),
+						av_prop_abv_bmsy = round(mean(prop_stocks_above_bmsy_COM), digits=2),
+						av_prop_nt_overfished = round(mean(prop_stocks_lng_trm_not_overfished_COM/100), digits = 2),
+						av_prop_nt_overfishing = round(mean(prop_lng_trm_no_overfishing_COM/100), digits = 2),
+						av_av_catch_Fmsy = round(mean(av_catch_Fmsy_COM), digits = 2))
+
+av_results <- group_by(dat_best_buffer, scenario_COM, ctrl_buffer_COM) %>%
+	summarise(data = "results",
+						av_pc10_bbmsy = round(mean(pc10_bbmsy_COM), digits = 2),
+						av_prop_abv_bmsy = round(mean(prop_stocks_above_bmsy_COM), digits = 2),
+						av_prop_nt_overfished = round(mean(prop_stocks_lng_trm_not_overfished_COM/100), digits = 2),
+						av_prop_nt_overfishing = round(mean(prop_lng_trm_no_overfishing_COM/100), digits = 2),
+						av_av_catch_Fmsy = round(mean(av_catch_Fmsy_COM), digits = 2)) %>%
+		rename(ctrl_buffer_true =ctrl_buffer_COM)
+
+av_results
+
+##find average errors across species and eds.
+#e.g. averagee proportional error, or average bbmsy lower than true after 5 years,
+
+#if Prop Error = NaN (i.e. 0/0) we make this = 0. 
+prop_error$PE_lg_tm_nt_overfishing[is.nan(prop_error$PE_lg_tm_nt_overfishing)] <- 0
+
+av_error <- group_by(prop_error, scenario_true, ctrl_buffer_true) %>%
+	summarise(data = "error",
+						av_pc10_bbmsy = round(mean(error_pc10_bbmsy), digits = 2),
+						av_prop_abv_bmsy = round(mean(error_prop_above_bbmsy), digits = 2),
+						av_prop_nt_overfished = round(mean(error_lg_tm_nt_overfished/100), digits = 2),
+						av_prop_nt_overfishing = round(mean(error_lg_tm_nt_overfishing/100), digits = 2),
+						av_av_catch_Fmsy = round(mean(error_av_catch_Fmsy), digits = 2))
+av_error
+
+av_prop_error <- group_by(prop_error, scenario_true, rea_yr_true, ed_true, ctrl_buffer_true) %>%
+	summarise(data = "prop_error",
+		av_pc10_bbmsy = round(mean(PE_pc10_bbmsy), digits = 2),
+						av_prop_abv_bmsy = round(mean(PE_prop_above_bbmsy), digits = 2),
+						av_prop_nt_overfished = round(mean(PE_lg_tm_nt_overfished), digits = 2),
+						av_prop_nt_overfishing = round(mean(PE_lg_tm_nt_overfishing), digits = 2),
+						av_av_catch_Fmsy = round(mean(PE_av_catch_Fmsy), digits = 2))
+av_prop_error
+
+metrics_results_table <- av_results %>%
+	rename(ctrl_buffer = ctrl_buffer_true, scenario = scenario_COM) %>%
+	select(scenario, ctrl_buffer, av_pc10_bbmsy:av_av_catch_Fmsy) 
+write.csv(metrics_results_table, file = "data-generated/summary_stats/Table2_metrics_results_table.csv")
+
+metrics_prop_error_table <- av_prop_error %>%
+	rename(ctrl_buffer = ctrl_buffer_true, scenario = scenario_true) %>% ungroup() %>%
+	select(scenario, ctrl_buffer, av_pc10_bbmsy:av_av_catch_Fmsy) 
+write.csv(metrics_prop_error_table, file = "data-generated/summary_stats/TableS4_metrics_error_table.csv")
+
+dat_summary_results <- list(av_results_sp, av_results, av_error, av_prop_error)
+saveRDS(dat_summary_results, file = "data-generated/summary_stats/table_summary_results_metrics_best_buffer.RDS")
+
+
+```
+
+```{r tables_dlm_vs_dlmUR_perf}
+rm(list = ls())
+dat_best_buffer <- readRDS(file = "data-generated/summary_stats/radar_dat_best_buffer.rds") %>% ungroup ()
+dat_UR_best_buffer <- readRDS(file = "data-generated/summary_stats/radar_dat_UR_best_buffer.rds")  %>% ungroup ()
+
+new_names_COM <- paste0(names(dat_best_buffer),"_COM")
+names(dat_best_buffer) <- new_names_COM
+new_names_UR <- paste0(names(dat_UR_best_buffer),"_UR")
+names(dat_UR_best_buffer) <- new_names_UR
+
+dat_UR_best_buffer_join <- bind_cols(dat_best_buffer, dat_UR_best_buffer) %>%
+	select(sp_UR, ed_UR, rea_yr_UR, scenario_UR, ctrl_buffer_UR, prop_stocks_above_bmsy_COM:av_catch_variation_COM, prop_stocks_above_bmsy_UR:av_catch_variation_UR)
+
+prop_error_UR <- dat_UR_best_buffer_join %>%
+	group_by(sp_UR, ed_UR, rea_yr_UR, scenario_UR, ctrl_buffer_UR) %>%
+	summarise(PE_prop_above_bbmsy = (prop_stocks_above_bmsy_UR - prop_stocks_above_bmsy_COM)/prop_stocks_above_bmsy_COM,
+						PE_av_bbmsy = (av_bbmsy_UR - av_bbmsy_COM)/av_bbmsy_COM,
+						PE_lg_tm_nt_overfished = (prop_stocks_lng_trm_not_overfished_UR - prop_stocks_lng_trm_not_overfished_COM) / prop_stocks_lng_trm_not_overfished_COM,
+						PE_pc10_bbmsy = (pc10_bbmsy_UR - pc10_bbmsy_COM)/pc10_bbmsy_COM,
+						PE_lg_tm_nt_overfishing = (prop_lng_trm_no_overfishing_UR - prop_lng_trm_no_overfishing_COM)/ prop_lng_trm_no_overfishing_COM,
+						PE_av_catch_Fmsy = (av_catch_Fmsy_UR - av_catch_Fmsy_COM)/ av_catch_Fmsy_COM,
+						error_prop_above_bbmsy = prop_stocks_above_bmsy_UR - prop_stocks_above_bmsy_COM, 
+						error_av_bbmsy = av_bbmsy_UR - av_bbmsy_COM,
+						error_lg_tm_nt_overfished = prop_stocks_lng_trm_not_overfished_UR - prop_stocks_lng_trm_not_overfished_COM,
+						error_pc10_bbmsy = pc10_bbmsy_UR - pc10_bbmsy_COM, 
+						error_lg_tm_nt_overfishing = prop_lng_trm_no_overfishing_UR - prop_lng_trm_no_overfishing_COM,
+						error_av_catch_Fmsy = av_catch_Fmsy_UR - av_catch_Fmsy_COM)
+
+ggplot(prop_error_UR, aes(PE_prop_above_bbmsy, colour = sp_UR)) +
+geom_density(aes(linetype = sp_UR)) + 
+	ggtitle("prop error UR vs DLM prop above Bmsy") + 
+	xlab(expression("Prop above B/B"[MSY])) +
+	#scale_x_continuous(limits = c(0, 3)) +
+	geom_vline(xintercept=0,linetype="dotted")+
+	#coord_cartesian(xlim=c(0, 3)) +
+	facet_grid(~ed_UR) +
+	ylab("Density") 
+
+ggplot(prop_error_UR, aes(PE_av_bbmsy, colour = sp_UR)) +
+geom_density(aes(linetype = sp_UR)) + 
+	ggtitle("Av B/Bmsy") + 
+	xlab(expression("B/B"[MSY])) +
+	#scale_x_continuous(limits = c(0, 3)) +
+	geom_vline(xintercept=0,linetype="dotted")+
+	#coord_cartesian(xlim=c(0, 3)) +
+	facet_grid(~ed_UR) +
+	ylab("Density") 
+
+ggplot(prop_error_UR, aes(PE_lg_tm_nt_overfished, colour = sp_UR)) +
+geom_density(aes(linetype = sp_UR)) + 
+	ggtitle("Prop yrs not overfished") + 
+	xlab(expression("Prop yrs above 25% B/B"[MSY])) +
+	#scale_x_continuous(limits = c(0, 3)) +
+	geom_vline(xintercept=0,linetype="dotted")+
+	#coord_cartesian(xlim=c(0, 3)) +
+	facet_grid(~ed_UR) +
+	ylab("Density") 
+
+ggplot(prop_error_UR, aes(PE_prop_above_bbmsy, PE_lg_tm_nt_overfishing)) +
+	geom_point(aes(colour = ed_UR, shape = sp_UR, size = PE_av_catch_Fmsy)) +
+	#	scale_x_continuous(limits = c(0, 3)) +
+	facet_grid(ctrl_buffer_UR ~ rea_yr_UR) +
+	geom_vline(xintercept=0,linetype="dotted")+
+	geom_hline(yintercept=0,linetype="dotted")
+
+ggplot(prop_error_UR, aes(PE_prop_above_bbmsy, PE_av_catch_Fmsy)) +
+	geom_point(aes(colour = ed_UR, shape = sp_UR)) +
+	facet_grid(ctrl_buffer_UR ~ rea_yr_UR) +
+	geom_vline(xintercept=0,linetype="dotted") +
+	geom_hline(yintercept=0,linetype="dotted") #+
+	#scale_y_continuous(limits = c(-1, 3)) 
+
+ggplot(prop_error_UR, aes(PE_pc10_bbmsy, PE_av_catch_Fmsy)) +
+	geom_point(aes(colour = ed_UR, shape = sp_UR)) +
+	facet_grid(ctrl_buffer_UR ~ rea_yr_UR) +
+	geom_vline(xintercept=0,linetype="dotted") +
+	geom_hline(yintercept=0,linetype="dotted")# +
+	#scale_y_continuous(limits = c(-1, 3)) 
+
+##Table with raw results from COMs URs using best buffers 
+av_results_sp_UR <- group_by(dat_UR_best_buffer, sp_UR, scenario_UR, ctrl_buffer_UR) %>%
+	summarise(data = "result",
+		av_pc10_bbmsy = round(mean(pc10_bbmsy_UR), digits = 2),
+						av_prop_abv_bmsy = round(mean(prop_stocks_above_bmsy_UR), digits=2),
+						av_prop_nt_overfished = round(mean(prop_stocks_lng_trm_not_overfished_UR/100), digits = 2),
+						av_prop_nt_overfishing = round(mean(prop_lng_trm_no_overfishing_UR/100), digits = 2),
+						av_av_catch_Fmsy = round(mean(av_catch_Fmsy_UR), digits = 2))
+
+
+av_results_UR <- group_by(dat_UR_best_buffer, scenario_UR, ctrl_buffer_UR) %>%
+	summarise(data = "results",
+						av_pc10_bbmsy = round(mean(pc10_bbmsy_UR), digits = 2),
+						av_prop_abv_bmsy = round(mean(prop_stocks_above_bmsy_UR), digits = 2),
+						av_prop_nt_overfished = round(mean(prop_stocks_lng_trm_not_overfished_UR/100), digits = 2),
+						av_prop_nt_overfishing = round(mean(prop_lng_trm_no_overfishing_UR/100), digits = 2),
+						av_av_catch_Fmsy = round(mean(av_catch_Fmsy_UR), digits = 2))
+
+av_results_UR
+
+##find average errors across species and eds.
+#e.g. average UR proportional error, or average bbmsy lower than DLM after 5 years,
+
+#if Prop Error = NaN (i.e. 0/0) we make this = 0. 
+prop_error_UR$PE_lg_tm_nt_overfishing[is.nan(prop_error_UR$PE_lg_tm_nt_overfishing)] <- 0
+
+av_error_UR <- group_by(prop_error_UR, scenario_UR, ctrl_buffer_UR) %>%
+	summarise(data = "error",
+						av_pc10_bbmsy = round(mean(error_pc10_bbmsy), digits = 2),
+						av_prop_abv_bmsy = round(mean(error_prop_above_bbmsy), digits = 2),
+						av_prop_nt_overfished = round(mean(error_lg_tm_nt_overfished/100), digits = 2),
+						av_prop_nt_overfishing = round(mean(error_lg_tm_nt_overfishing/100), digits = 2),
+						av_av_catch_Fmsy = round(mean(error_av_catch_Fmsy), digits = 2))
+av_error_UR
+
+av_prop_error_UR <- group_by(prop_error_UR, scenario_UR, rea_yr_UR, ed_UR, ctrl_buffer_UR) %>%
+	summarise(data = "prop_error",
+		av_pc10_bbmsy = round(mean(PE_pc10_bbmsy), digits = 2),
+						av_prop_abv_bmsy = round(mean(PE_prop_above_bbmsy), digits = 2),
+						av_prop_nt_overfished = round(mean(PE_lg_tm_nt_overfished), digits = 2),
+						av_prop_nt_overfishing = round(mean(PE_lg_tm_nt_overfishing), digits = 2),
+						av_av_catch_Fmsy = round(mean(PE_av_catch_Fmsy), digits = 2))
+av_prop_error_UR
+
+metrics_results_table_UR <- av_results_UR %>%
+	rename(ctrl_buffer = ctrl_buffer_UR, scenario = scenario_UR) %>%
+	select(scenario, ctrl_buffer, av_pc10_bbmsy:av_av_catch_Fmsy) 
+write.csv(metrics_results_table_UR, file = "data-generated/summary_stats/metrics_results_table_UR.csv")
+
+metrics_prop_error_table_UR <- av_prop_error_UR %>%
+	rename(ctrl_buffer = ctrl_buffer_UR, scenario = scenario_UR) %>% ungroup() %>%
+	select(scenario, ctrl_buffer, av_pc10_bbmsy:av_av_catch_Fmsy) 
+write.csv(metrics_prop_error_table_UR, file = "data-generated/summary_stats/metrics_error_table_UR.csv")
+
+#av PE with 50% UR (high)
+av_prop_error_UR_high <- filter(prop_error_UR, sp_UR %in% c("CR", "SJ")) %>%
+	group_by(scenario_UR, rea_yr_UR, ed_UR, ctrl_buffer_UR) %>%
+	summarise(data = "prop_error_high",
+		av_pc10_bbmsy = round(mean(PE_pc10_bbmsy), digits = 2),
+						av_prop_abv_bmsy = round(mean(PE_prop_above_bbmsy), digits = 2),
+						av_prop_nt_overfished = round(mean(PE_lg_tm_nt_overfished), digits = 2),
+						av_prop_nt_overfishing = round(mean(PE_lg_tm_nt_overfishing), digits = 2),
+						av_av_catch_Fmsy = round(mean(PE_av_catch_Fmsy), digits = 2))
+
+#av PE with 20% UR (moderate)
+av_prop_error_UR_mod <- filter(prop_error_UR, sp_UR %in% c("SA", "BC", "PS")) %>%
+	group_by(scenario_UR, rea_yr_UR, ed_UR, ctrl_buffer_UR) %>%
+	summarise(data = "prop_error_mod",
+		av_pc10_bbmsy = round(mean(PE_pc10_bbmsy), digits = 2),
+						av_prop_abv_bmsy = round(mean(PE_prop_above_bbmsy), digits = 2),
+						av_prop_nt_overfished = round(mean(PE_lg_tm_nt_overfished), digits = 2),
+						av_prop_nt_overfishing = round(mean(PE_lg_tm_nt_overfishing), digits = 2),
+						av_av_catch_Fmsy = round(mean(PE_av_catch_Fmsy), digits = 2))
+
+av_prop_errors_UR_joined = bind_rows(av_prop_error_UR_high, av_prop_error_UR_mod)
+write.csv(av_prop_errors_UR_joined, file = "data-generated/summary_stats/metrics_prop_error_table_UR_high_vs_mod.csv")
+
+dat_summary_results_UR <- list(av_results_sp_UR, av_results_UR, av_error_UR, av_prop_error_UR)
+saveRDS(dat_summary_results_UR, file = "data-generated/summary_stats/table_summary_results_metrics_best_buffer_UR.RDS")
+
+
+```
+
+##Best buffer plots - all scenarios
+```{r plots_best_buffer}
+##Create plots for each metric with best buffers based on perfect information
+#load data
+rm(list= ls())
+metrics_buffer <- readRDS(paste0("data-generated/summary_stats/metrics_best_buffer.rds"))
+metrics_buffer$sp <- factor(metrics_buffer$sp, levels = c("BC","CR","PS","SA","SJ"),labels = c("Rockfish","Corvina","Sole","Sardine","Tuna"))
+
+
+#for together plots for Figures in supp info
+theme_sleek_base <- function(base_size = 12, base_family = "") {
+	half_line <- base_size/2
+	theme_light(base_size = 12, base_family = "") +
+		theme(
+			panel.grid.major = element_blank(),
+			panel.grid.minor = element_blank(),
+			axis.ticks.length = unit(half_line/2.2, "pt"),
+			strip.background = element_rect(fill = NA, colour = NA),
+			strip.text.x = element_text(size = 12, colour = "grey20"),
+			strip.text.y = element_text(size = 12, colour = "grey20"),
+			axis.text = element_text(colour = "grey30"),
+			axis.title = element_text(colour = "grey30"),
+			legend.title = element_text(colour = "grey30", size = rel(0.9)),
+			panel.border = element_rect(fill = NA, colour = "grey70", size = 1),
+			legend.position="none",
+			legend.key.size = unit(0.9, "lines"),
+			legend.text = element_text(size = rel(0.7), colour = "grey30"),
+			legend.key = element_rect(colour = NA, fill = NA),
+			legend.background = element_rect(colour = NA, fill = NA)
+		)
+}
+
+
+median.quartile <- function(x){
+  out <- quantile(x, probs = c(0.25,0.75))
+  names(out) <- c("ymin","ymax")
+  return(out)
+}
+
+median.10.quartile <- function(x){
+  out <- quantile(x, probs = c(0.10,0.90))
+  names(out) <- c("ymin","ymax")
+  return(out)
+}
+
+#plot function
+plot_performance_metrics_buffer <- function(dat) {
+ggplot(dat, aes(as.factor(ctrl_buffer), perf_metric)) + 
+	geom_violin(aes(fill=factor(ctrl_buffer)), scale = "width", trim = TRUE) +
+	#geom_jitter(width = 0.1, height = 0, alpha = 0.7) +
+	scale_fill_brewer(palette="Paired") +
+	stat_summary(fun.y="median.quartile", geom="line", size = 0.6) +
+	stat_summary(fun.y="median.10.quartile", geom="line", size = 0.2) +
+	stat_summary(fun.y="median", geom="point", fill="black", shape=21, size=2) +
+	xlab("Harvest Control Rule") +
+	facet_grid(scenario~sp) +
+	theme_sleek_base() +
+			theme(axis.text=element_text(size=10),
+        axis.title=element_text(size=14),
+				axis.text.x=element_text(angle=90, vjust=0.4,hjust=1),
+				plot.title=element_text(size=18),
+				legend.title = element_blank())
+}
+
+###BBmsy current best buffer Figure 4 ###
+metrics_plot <- select(metrics_buffer,sp,ts,ed,j,rea_yr,ctrl_buffer,scenario,BBmsy_final) %>%
+	rename(perf_metric = BBmsy_final)
+pdf(file = paste0("plots/Fig4_performance_metrics_plots_current_BBmsy_best_buffer.pdf"), width = 16, height = 9)
+#png(file = paste0("plots/Fig4_performance_metrics_plots_current_BBmsy_best_buffer.png"), width = 16, height = 9, units = "in", res= 600)
+plot_performance_metrics_buffer(dat=metrics_plot) +
+	geom_hline(yintercept = 1) +
+	geom_hline(yintercept = 0.25, linetype = "dashed") +
+#	ggtitle("Current B/Bmsy status best buffer") +
+	ylab(expression("B/B"[MSY]*" (mean of last 3 yrs)")) +
+	coord_cartesian(ylim = c(0, 4)) 
+dev.off()
+	
+summary_bbmsy_ctrl <- metrics_plot %>% group_by(sp, scenario, ctrl_buffer) %>%
+	summarise(median = median(perf_metric),
+				#	quartile05 = quantile(perf_metric, probs = 0.05),
+					quartile10 = quantile(perf_metric, probs = 0.10),
+					quartile25 = quantile(perf_metric, probs = 0.25),
+					quartile75 = quantile(perf_metric, probs = 0.75),
+					max = max(perf_metric))
+
+summary_bbmsy <- metrics_plot %>% group_by(ctrl_buffer, scenario) %>%
+	summarise(median = median(perf_metric),
+					quartile10 = quantile(perf_metric, probs = 0.10),
+					quartile25 = quantile(perf_metric, probs = 0.25),
+					quartile75 = quantile(perf_metric, probs = 0.75),
+					max = max(perf_metric))
+
+#For presentation
+# corvina and sardine BBmsy
+
+# # for old Fig 4 - BBmsy and FFmsy separate plots
+# theme_sleek_mod <- function(base_size = 12, base_family = "") {
+# 	half_line <- base_size/2
+# 	theme_light(base_size = 11, base_family = "") +
+# 		theme(
+# 			panel.grid.major = element_blank(),
+# 			panel.grid.minor = element_blank(),
+# 			axis.ticks.length = unit(half_line/2.2, "pt"),
+# 			strip.background = element_rect(fill = NA, colour = NA),
+# 			strip.text.x = element_text(size = 11, colour = "grey20"),
+# 			strip.text.y = element_text(size = 11, colour = "grey20"),
+# 			axis.text = element_text(size= 11, colour = "grey30"),
+# 			axis.text.x = element_text(angle=90, vjust=0.4,hjust=1),
+# 			axis.title.y = element_text(margin=margin(10,10,0,0)), 
+# 			axis.title = element_text(size= 12, colour = "grey30"),
+# 			panel.border = element_rect(fill = NA, colour = "grey70", size = 1),
+# 		legend.position="none")
+# 		}
+
+metrics_plot_pres <- select(metrics_buffer,sp,ts,ed,j,rea_yr,ctrl_buffer,scenario,BBmsy_final) %>%
+	rename(perf_metric = BBmsy_final) %>%
+	filter(sp %in% c("Corvina", "Sardine")) %>%
+	filter(scenario %in% c("OW_5yr", "OW_20yr"))
+png(file = paste0("plots/presentation_performance_metrics_plots_current_BBmsy_best_buffer.png"), width = 12, height = 9, units = "in", res= 600)
+plot_performance_metrics_buffer(dat=metrics_plot_pres) +
+	geom_hline(yintercept = 1) +
+	geom_hline(yintercept = 0.25, linetype = "dashed") +
+	ylab(expression("B/B"[MSY])) +
+	coord_cartesian(ylim = c(0, 4)) 
+dev.off()
+
+
+###BBmsy current TRUE Info###
+metrics_true_buffer <- readRDS(paste0("data-generated/summary_stats/metrics_true_best_buffer.rds"))
+metrics_true_buffer$sp <- factor(metrics_true_buffer$sp, levels = c("BC","CR","PS","SA","SJ"),labels = c("Rockfish","Corvina","Sole","Sardine","Tuna"))
+
+#pdf(file = paste0("plots/FigS8_performance_metrics_current_BBmsy_true_best_buffer.pdf"), width = 16, height = 9)
+png(file = paste0("plots/FigS8_performance_metrics_current_BBmsy_true_best_buffer.png"), width = 8, height = 6, units = "in",res=600)
+metrics_plot <- select(metrics_true_buffer,sp,ts,ed,j,rea_yr,ctrl_buffer,scenario,BBmsy_final) %>%
+	rename(perf_metric = BBmsy_final)
+plot_performance_metrics_buffer(dat=metrics_plot) +
+	geom_hline(yintercept = 1) +
+	geom_hline(yintercept = 0.25, linetype = "dashed") +
+	#ggtitle("Final B/Bmsy status TRUE best buffer") +
+	ylab(expression("B/B"[MSY]*" (mean of last 3 yrs)")) +
+	coord_cartesian(ylim = c(0, 4)) 
+dev.off()
+
+
+### BBmsy change DLM since management 
+metrics_plot <- select(metrics_buffer,sp,ts,ed,j,rea_yr,ctrl_buffer,scenario, change_bbmsy) %>%
+	rename(perf_metric = change_bbmsy) 
+pdf(file = paste0("plots/performance_metrics_plots_change_BBmsy_best_buffer.pdf"), width = 16, height = 9)
+#png(file = paste0("plots/performance_metrics_plots_change_BBmsy_best_buffer.png"), width = 16, height = 9, units = "in", res= 600)
+plot_performance_metrics_buffer(dat=metrics_plot) +
+	geom_hline(yintercept = 0, linetype = "dashed") +
+#	ggtitle("Change in B/Bmsy status best buffer") +
+	ylab(expression("Change in B/B"[MSY])) +
+	coord_cartesian(ylim = c(-5, 10)) 
+dev.off()
+
+
+
+### Prop of years that stocks were heavily overfished (<25%Bmsy)
+pdf(file = paste0("plots/performance_metrics_plots_yrs_overfished_best_buffer.pdf"), width = 16, height = 9)
+metrics_plot <- select(metrics_buffer,sp,ts,ed,j,rea_yr,ctrl_buffer,scenario,prop_25bmsy) %>%
+	rename(perf_metric = prop_25bmsy)
+plot_performance_metrics_buffer(dat = metrics_plot) +
+	ggtitle("Prop. years overfished (<25%Bmsy)") +
+	ylab("Prop. years below 25% Bmsy")
+dev.off()
+
+### FFmsy at end of management period
+metrics_plot <- select(metrics_buffer,sp,ts,ed,j,rea_yr,ctrl_buffer,scenario,FFmsy_final) %>%
+	rename(perf_metric = FFmsy_final)
+pdf(file = paste0("plots/FigS2_performance_metrics_plots_current_FFmsy_buffer.pdf"), width = 10, height = 6)
+png(file = paste0("plots/FigS2_performance_metrics_plots_current_FFmsy_buffer.png"), width = 10, height = 6, units = "in",res=600)
+plot_performance_metrics_buffer(dat= metrics_plot) +
+	geom_hline(yintercept = 1, linetype = "dashed") +
+# ggtitle("F/Fmsy status - end of management period") +
+	ylab(expression("F/F"[MSY]*" (mean of last 3 yrs)")) +
+	labs(x = "Harvest Control Rule", y = expression("F/F"[MSY]*" (mean of last 3 yrs)")) +	 	
+	coord_cartesian(ylim = c(0, 7)) 
+dev.off()
+
+summary_ffmsy_ctrl <- metrics_plot %>% group_by(sp, scenario, ctrl_buffer) %>%
+	summarise(median = median(perf_metric),
+					quartile25 = quantile(perf_metric, probs = 0.25),
+					quartile75 = quantile(perf_metric, probs = 0.75),
+					max = max(perf_metric),
+					prop_below_fmsy =sum(perf_metric<=1)/length(perf_metric))
+
+summary_ffmsy_scenario <- metrics_plot %>% group_by(ctrl_buffer, scenario) %>%
+	summarise(median = median(perf_metric),
+					quartile25 = quantile(perf_metric, probs = 0.25),
+					quartile75 = quantile(perf_metric, probs = 0.75),
+					max = max(perf_metric),
+					prop_below_fmsy =sum(perf_metric<=1)/length(perf_metric))
+
+summary_ffmsy <- metrics_plot %>% group_by(ctrl_buffer) %>%
+	summarise(median = median(perf_metric),
+					quartile25 = quantile(perf_metric, probs = 0.25),
+					quartile75 = quantile(perf_metric, probs = 0.75),
+					max = max(perf_metric),
+					prop_below_fmsy =sum(perf_metric<=1)/length(perf_metric))
+
+#   ctrl_buffer    median quartile25 quartile75       max prop_below_fmsy
+# 1  HR4010 0.5 0.7581576  0.4543470   1.211094 12.975393       0.6585833
+# 2    HRsw 0.5 0.4385712  0.2110101   0.802110  8.186265       0.8091667
+# 3 TAC4010 0.5 0.6517006  0.2200440   2.136551 12.975393       0.5953333
+# 4   TACsw 0.7 0.3880737  0.1014323   2.021234 12.975393       0.6755000
+# 5       BAU 1 1.7015596  1.1092808   2.097175 12.744458       0.2314167
+# 
+### Prop of years that stocks with overfishing (>Fmsy)
+metrics_plot <- select(metrics_buffer,sp,ts,ed,j,rea_yr,ctrl_buffer,scenario,prop_abovefmsy) %>%
+	rename(perf_metric = prop_abovefmsy)
+pdf(file =  paste0("plots/performance_metrics_plots_prop_yrs_overfishing_best_buffer.pdf"), width = 16, height = 9)
+plot_performance_metrics_buffer(dat=metrics_plot) +
+	ggtitle("Prop. years overfishing during management") +
+	ylab(expression("Prop. years above F/F"[MSY])) 
+dev.off()
+
+###mean annual catch during management period, relative to yield at Fmsy###
+metrics_plot <- select(metrics_buffer,sp,ts,ed,j,rea_yr,ctrl_buffer,scenario,catch_relFmsy_mean) %>%
+	rename(perf_metric = catch_relFmsy_mean)
+pdf(file = paste0("plots/FigS5_performance_metrics_plots_catch_relFmsy_mean_buffer_bean.pdf"), width = 10, height = 6)
+#png(file = paste0("plots/FigS5_performance_metrics_plots_catch_relFmsy_mean_buffer_bean.png"), width = 10, height = 6, units = "in",res=600)
+plot_performance_metrics_buffer(dat= metrics_plot) +
+	#ggtitle("Mean catch/year, relative to MSY") +
+	geom_hline(yintercept = 1, linetype = "dashed") +
+	ylab(expression("Mean catch/year during management relative to F"[MSY]*" yield")) +
+	coord_cartesian(ylim = c(0, 3)) 
+dev.off()
+
+###St dev of catches over management period ###
+metrics_plot <- select(metrics_buffer,sp,ts,ed,j,rea_yr,ctrl_buffer,scenario,catch_sd) %>%
+	rename(perf_metric = catch_sd)
+pdf(file = paste0("plots/FigS6_performance_metrics_plots_catch_sd_together_buffer.pdf"), width = 10, height = 6)
+#png(file = paste0("plots/FigS6_performance_metrics_plots_catch_sd_together_buffer.png"), width = 8, height = 6, units = "in",res=600)
+plot_performance_metrics_buffer(dat=metrics_plot) +
+	#ggtitle("Annual variation in catches during mamagement") +
+	ylab("St dev. of catches during management") +
+	coord_cartesian(ylim = c(0, 1.5)) 
+#ylim(c(0,2))
+dev.off()
+
+
+
+```
+
+
+## Radar plots 
+```{r radar_plots}
+radar_dat_best_buffer <- readRDS(file = "data-generated/summary_stats/radar_dat_best_buffer.rds")
+radar_dat_best_buffer$prop_lng_trm_no_overfishing = radar_dat_best_buffer$prop_lng_trm_no_overfishing/100
+
+radar_dat_best_buffer_long <- radar_dat_best_buffer %>% ungroup() %>% select(sp, scenario, ctrl_buffer, prop_stocks_above_bmsy, pc10_bbmsy,	prop_lng_trm_no_overfishing, av_catch_Fmsy) %>% 
+	reshape2::melt(id=c("sp","scenario","ctrl_buffer"))
+
+#set min and max values per each axix
+maxmin <- data.frame(
+prop_stocks_above_bmsy = c(0.75, 0),
+pc10_bbmsy=c(0.75,0),
+prop_lng_trm_no_overfishing = c(1.25, 0),
+av_catch_Fmsy = c(1.5, 0)) 
+
+ctrl_col <- RColorBrewer::brewer.pal(5,"Paired")
+
+sp_lookup = data.frame(c('BC','SA','PS','SJ','CR'),
+                       c('Rockfish','Sardine','Sole',
+                         'Tuna',	'Corvina'))
+colnames(sp_lookup)<-c('Symbol', 'Name')
+
+scenario <- factor(c("ED03_5yr", "ED03_20yr","OW_5yr", "OW_20yr"))
+scen_lookup = data.frame(c("ED03_5yr", "ED03_20yr","OW_5yr", "OW_20yr"),
+												 c("ED 5yr", "ED 20yr","OW 5yr", "OW 20 yr"))
+colnames(scen_lookup)<-c('Symbol', 'Name')
+
+
+#make graph with all species 
+#pdf(file= paste0("plots/radar_plot_", scen_i, ".pdf", width = 8.5, height = 12)
+for (scen_i in scenario) {
+png(filename = paste0("plots/radar_plot_", scen_i, ".png"),width = 8.5, height = 12, units = "in",res = 600)
+op <- par(mar=c(1, 0.1, 1.5, 0.1),oma=c(0.025,0.05,0.025,0.05),mfrow=c(3, 2))
+lapply(sp_lookup$Symbol, function(i) { 
+
+summary_dat <- radar_dat_best_buffer_long %>% 
+	filter(scenario == scen_i) %>% 
+	filter(sp == i) %>%
+reshape::cast(ctrl_buffer ~ variable, margins = FALSE)
+radar_dat_sp <- summary_dat[,-1]
+radar_dat_sp <- rbind(maxmin,radar_dat_sp)
+
+radarchart(radar_dat_sp,axistype=3, seg=5, vlabels=c("Prop stocks\nabove Bmsy","10th% Bmsy\n status", "Prop yrs with\nno overfishing", "Median\nyield"),
+title= sp_lookup$Name[match(i,sp_lookup$Symbol)], axislabcol = "black", vlcex=1, pcol=ctrl_col, caxislabels = c("0","","","","",""), plty=rep(1,5), plwd = rep(2,5), cglcol = "grey30")
+})
+plot.new()
+legend("center", legend = c("Effort 40-10 0.5", "Effort step 0.5","Catch 40-10 0.5","Catch step 0.7", "BAU"), 
+			 col=c(ctrl_col),
+			 lty = c(1,1,1,1,1),
+			 horiz=FALSE,cex=1,bty = "n", bg = "n", lwd = 2)
+dev.off()
+}
+
+### Radar Plots of single species across all scenarios ###
+#Bocaccio radar plots
+radar_dat_best_buffer_long_BC <- filter(radar_dat_best_buffer_long, sp == "BC")
+
+png(filename = "plots/Fig5_radar_plot_BC.png", width = 9.5, height = 10, units = "in",res = 600)
+#pdf(file = "plots/Fig5_radar_plot_BC.pdf", width = 8.5, height = 10)
+op <- par(mar=c(1.5, 0, 1, 0.1),oma=c(0.025,0.025,0.025,0.05),mfrow=c(2, 2),xpd=TRUE)
+lapply(scenario, function(i) { 
+
+summary_dat <- radar_dat_best_buffer_long_BC %>% 
+filter(scenario == i) %>%
+reshape::cast(ctrl_buffer ~ variable, margins = FALSE)
+radar_dat_sp <- summary_dat[,-1]
+radar_dat_sp <- rbind(maxmin,radar_dat_sp)
+
+radarchart(radar_dat_sp,axistype=3, seg=5, vlabels=c(expression("Prop stocks above B"[MSY]), expression("% B"[MSY  ]),  "Prop yrs with\nno overfishing", " Median\n   yield"),
+title= scen_lookup$Name[match(i,scen_lookup$Symbol)], axislabcol = "black", vlcex=1, pcol=ctrl_col, caxislabels = c("0","","","","",""), plty=rep(1,5), plwd = rep(2,5), cglcol = "grey30")
+})
+legend("bottomright", legend = c("Effort 40-10 0.5", "Effort step 0.5","Catch 40-10 0.5","Catch step 0.7", "BAU"), 
+			 col=c(ctrl_col),
+			 lty = c(1,1,1,1,1),
+			 horiz=FALSE,cex=1,bty = "n", bg = "n", lwd = 2)
+dev.off()
+
+##Tuna - radar plots
+radar_dat_best_buffer_long_SJ <- filter(radar_dat_best_buffer_long, sp == "SJ")
+
+png(filename = "plots/Fig6_radar_plot_SJ.png", width = 9.5, height = 10, units = "in",res = 600)
+#pdf(file = "plots/Fig6_radar_plot_SJ.pdf", width = 8.5, height = 10)
+op <- par(mar=c(1.5, 0, 1, 0.1),oma=c(0.025,0.025,0.025,0.05),mfrow=c(2, 2),xpd=TRUE)
+lapply(scenario, function(i) { 
+
+summary_dat <- radar_dat_best_buffer_long_SJ %>% 
+filter(scenario == i) %>%
+reshape::cast(ctrl_buffer ~ variable, margins = FALSE)
+radar_dat_sp <- summary_dat[,-1]
+radar_dat_sp <- rbind(maxmin,radar_dat_sp)
+
+radarchart(radar_dat_sp,axistype=3, seg=5, vlabels=c(expression("Prop stocks above B"[MSY]), expression("% B"[MSY  ]),  "Prop yrs with\nno overfishing", " Median\n   yield"),
+title= scen_lookup$Name[match(i,scen_lookup$Symbol)], axislabcol = "black", vlcex=1, pcol=ctrl_col, caxislabels = c("0","","","","",""), plty=rep(1,5), plwd = rep(2,5), cglcol = "grey30")
+})
+legend("bottomright", legend = c("Effort 40-10 0.5", "Effort step 0.5","Catch 40-10 0.5","Catch step 0.7", "BAU"), 
+			 col=c(ctrl_col),
+			 lty = c(1,1,1,1,1),
+			 horiz=FALSE,cex=1,bty = "n", bg = "n", lwd = 2)
+dev.off()
+
+
+```
+
+## Radar plots with perfect information
+```{r radar-plots-perfect-info}
+###Radar plot using true info, based on min buffer to satisfy objectives for all species ###
+radar_dat_true_best_buffer <- readRDS(file = "data-generated/summary_stats/radar_dat_true_best_buffer.rds")
+radar_dat_true_best_buffer$prop_lng_trm_no_overfishing = radar_dat_true_best_buffer$prop_lng_trm_no_overfishing/100
+
+radar_dat_true_best_buffer_long <- radar_dat_true_best_buffer %>% ungroup() %>% select(sp, ctrl_buffer, scenario, prop_stocks_above_bmsy, pc10_bbmsy,	prop_lng_trm_no_overfishing, av_catch_Fmsy) %>% 
+	reshape2::melt(id=c("sp", "scenario", "ctrl_buffer"))
+
+maxmin_true <- data.frame(
+prop_stocks_above_bmsy = c(1, 0),
+pc10_bbmsy=c(1,0),
+prop_lng_trm_no_overfishing = c(1.25, 0),
+av_catch_Fmsy = c(1.5, 0)) 
+
+#make graph with all species - True info
+#pdf(file= paste0("plots/radar_plot_ture_", scen_i, ".pdf", width = 8.5, height = 12)
+for (scen_i in scenario) {
+png(filename = paste0("plots/radar_plot_true_", scen_i, ".png"),width = 8.5, height = 12, units = "in",res = 600)
+op <- par(mar=c(1, 0.1, 1.5, 0.1),oma=c(0.025,0.05,0.025,0.05),mfrow=c(3, 2))
+lapply(sp_lookup$Symbol, function(i) { 
+
+summary_dat <- radar_dat_true_best_buffer_long %>% 
+	filter(scenario == scen_i) %>% 
+	filter(sp == i) %>%
+reshape::cast(ctrl_buffer ~ variable, margins = FALSE)
+radar_dat_sp <- summary_dat[,-1]
+radar_dat_sp <- rbind(maxmin_true,radar_dat_sp)
+
+radarchart(radar_dat_sp,axistype=3, seg=5, vlabels=c("Prop stocks\nabove Bmsy","10th% Bmsy\n status", "Prop yrs with\nno overfishing", "Median\nyield"),
+title= sp_lookup$Name[match(i,sp_lookup$Symbol)], axislabcol = "black", vlcex=1, pcol=ctrl_col, caxislabels = c("0","","","","",""), plty=rep(1,5), plwd = rep(2,5), cglcol = "grey30")
+})
+plot.new()
+legend("center", legend = c("Effort 40-10 0.5", "Effort step 0.5","Catch 40-10 0.5","Catch step 0.7", "BAU"), 
+			 col=c(ctrl_col),
+			 lty = c(1,1,1,1,1),
+			 horiz=FALSE,cex=1,bty = "n", bg = "n", lwd = 2)
+dev.off()
+}
+
+
+### Radar Plots of single species across all scenarios - TRUE Info ###
+#Bocaccio radar plots
+radar_dat_true_best_buffer_long_BC <- filter(radar_dat_true_best_buffer_long, sp == "BC")
+
+png(filename = "plots/FigS7_radar_plot_true_BC.png", width = 9.5, height = 10, units = "in",res = 600)
+#pdf(file = "plots/FigS7_radar_plot_true_BC.pdf", width = 8.5, height = 10)
+op <- par(mar=c(1.5, 0, 1, 0.1),oma=c(0.025,0.025,0.025,0.05),mfrow=c(2, 2),xpd=TRUE)
+lapply(scenario, function(i) { 
+
+summary_dat <- radar_dat_true_best_buffer_long_BC %>% 
+filter(scenario == i) %>%
+reshape::cast(ctrl_buffer ~ variable, margins = FALSE)
+radar_dat_sp <- summary_dat[,-1]
+radar_dat_sp <- rbind(maxmin_true,radar_dat_sp)
+
+radarchart(radar_dat_sp,axistype=3, seg=5, vlabels=c(expression("Prop stocks above B"[MSY]), expression("% B"[MSY  ]),  "Prop yrs with\nno overfishing", " Median\n   yield"),
+title= scen_lookup$Name[match(i,scen_lookup$Symbol)], axislabcol = "black", vlcex=1, pcol=ctrl_col, caxislabels = c("0","","","","",""), plty=rep(1,5), plwd = rep(2,5), cglcol = "grey30")
+})
+legend("bottomright", legend = c("Effort 40-10 0.5", "Effort step 0.5","Catch 40-10 0.5","Catch step 0.7", "BAU"), 
+			 col=c(ctrl_col),
+			 lty = c(1,1,1,1,1),
+			 horiz=FALSE,cex=1,bty = "n", bg = "n", lwd = 2)
+dev.off()
+
+
+```
+
+
+## First assessment using data-limited models, before management  
+
+### Error and bias from superensemble
+* BBmsy - estimated vs true bbmsy at end of simulation period before management
+* Harvest ratio - estimates vs true harvest ratio (catch/biomass) at end of simulation period
+* Fmsy - estimated vs true
+* MSY - estimated vs true
+* HCR target values - based on estimated values vs true values
+
+<!--###Types of ensemble models used
+Proportion of replications that use each type of ensemble - TODO   
+TODO - find examples where COMSIR doesn't converge
+-->
+\newpage
+
+### BBmsy of stocks before management 
+Estimated from past 5 years of simulation period using Random Forest superensemble method of data-limited models CMSY, COMSIR and MPRM   
+
+- Before assessment and management, most simulated stocks for the 6 species were overfished (below Bmsy).  
+- During the first assessment, the superensemble of catch only models estimated most stocks to be either below Bmsy (exhibiting a slight bimodal distribution with B/Bmsy >1) 
+
+- The superensemble is overestimating the current bbmsy for all stocks, shown by the strongly positive proportional errors between the estimated and true values of current bbmsy. 
+
+- why doesn't the estimated bbmsy based on ensemble go below 0.5Bmsy for any stocks? 
+
+```{r error_target_HCRs, fig.width = 4, fig.height = 6}
+#Target HCRs - calculate error and plot
+
+#for histogram plots in Supp Info
+theme_sleek_hist <- function(base_size = 12, base_family = "") {
+	half_line <- base_size/2
+	theme_light(base_size = 12, base_family = "") +
+		theme(
+			panel.grid.major = element_blank(),
+			panel.grid.minor = element_blank(),
+			axis.ticks.length = unit(half_line/2.2, "pt"),
+			strip.background = element_rect(fill = NA, colour = NA),
+			strip.text.x = element_text(size = 12, colour = "grey20"),
+			strip.text.y = element_text(size = 12, colour = "grey20"),
+			axis.text = element_text(colour = "grey30"),
+			axis.title = element_text(colour = "grey30"),
+			title = element_text(size = rel(0.8)),
+			legend.title = element_blank(),
+			panel.border = element_rect(fill = NA, colour = "grey70", size = 0.8),
+			legend.key.size = unit(0.9, "lines"),
+			legend.text = element_text(size = rel(0.7), colour = "grey30"),
+			legend.key = element_rect(colour = NA, fill = NA),
+			legend.background = element_rect(colour = NA, fill = NA)
+		)
+}
+
+HCR_target_vals <- readRDS(file=paste0("data-generated/HCR_target_vals_dat.rds"))
+HCR_target_vals$sp <- factor(HCR_target_vals$sp, levels = c("BC","CR","PS","SA","SJ"),labels = c("Rockfish","Corvina","Sole","Sardine","Tuna"))
+
+true_hcr_vals <- filter(HCR_target_vals, Model == "true") %>%
+	filter(buffer == 1)
+est_hcr_vals <-filter(HCR_target_vals, Model == "estimated") %>%
+	filter(buffer == 1)
+
+HCR_target_vals_wide <-merge(true_hcr_vals,est_hcr_vals,by=c("sp", "ts", "ed", "buffer","j", "filename_buf")) %>%
+	filter(buffer == 1)
+
+#x = true, y = estimated
+HCR_target_vals_wide$Error_BBmsy <- (HCR_target_vals_wide$BBmsy_current.y-HCR_target_vals_wide$BBmsy_current.x)/HCR_target_vals_wide$BBmsy_current.x
+
+true_bbmsy_plot <- ggplot(true_hcr_vals, aes(BBmsy_current, colour = sp)) +
+geom_density(aes(linetype = sp)) + 
+	ggtitle(expression("a) True B/B"[MSY])) + 
+	xlab(expression("B/B"[MSY])) +
+	#scale_x_continuous(limits = c(0, 3)) +
+	geom_vline(xintercept=1,linetype="dotted")+
+	coord_cartesian(xlim=c(0, 3)) +
+	facet_grid(~ed) +
+	ylab("Density") +
+	theme_sleek_hist()
+ 
+est_bbmsy_plot <- ggplot(est_hcr_vals, aes(BBmsy_current, colour = sp)) +
+geom_density(aes(linetype = sp)) + ggtitle(expression("b) Estimated B/B"[MSY])) +
+	coord_cartesian(xlim=c(0, 3)) +
+	#scale_x_continuous(limits = c(0,3))+
+	geom_vline(xintercept=1,linetype="dotted")+
+	facet_grid(~ed) +
+	xlab(expression("B/B"[MSY])) +
+	ylab("Density") +
+	theme_sleek_hist()
+
+error_bbmsy_plot <- ggplot(HCR_target_vals_wide, aes(Error_BBmsy, colour = sp)) +
+geom_density(aes(linetype = sp)) + ggtitle(expression("c) Prop. Error for B/B"[MSY])) +
+#scale_x_continuous(limits = c(-1, 10)) +
+coord_cartesian(xlim=c(-1, 10)) +
+	geom_vline(xintercept=0,linetype="dotted")+
+	facet_grid(~ed) + 
+	xlab(expression("Proportional error B/B"[MSY])) +
+	ylab("Density") +
+	theme_sleek_hist() 
+
+png("plots/FigS1_error_bbmsy.png",width = 7, height = 10, units = "in", res = 600)
+#pdf("plots/FigS1_error_bbmsy.pdf",width = 7, height = 10)
+grid.arrange(true_bbmsy_plot, est_bbmsy_plot, error_bbmsy_plot, ncol=1)
+dev.off()
+
+HCR_target_vals_wide %>% dplyr::group_by(as.factor(ed)) %>% 
+	dplyr::summarise(max_BBmsy = max(Error_BBmsy),
+									BBmsy_over_10 = sum(Error_BBmsy > 10))  
+# A tibble: 2 × 3
+#  `as.factor(ed)` max_BBmsy BBmsy_over_10
+#           <fctr>     <dbl>         <int>
+#1            ED03  21.94011            13
+#2              OW  21.07237            10
+
+true_hcr_vals_clean <- filter(true_hcr_vals, buffer == "1")
+summary(true_hcr_vals_clean$BBmsy_current)
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+# 0.02664 0.35990 0.56900 0.65800 0.84360 4.69100 
+
+(prop_stocks_above_bmsy <- sum(true_hcr_vals_clean$BBmsy_current > 1)/length(true_hcr_vals_clean$BBmsy_current))
+#1015/6000
+# 16.9%
+
+group_by(est_hcr_vals, sp, ed) %>%
+				 summarize(median_bbmsy = median(BBmsy_current))
+#          sp    ed median_bbmsy
+#      <fctr> <chr>        <dbl>
+#  1 Rockfish  ED03    0.8155146
+#  2 Rockfish    OW    0.9616448
+#  3  Corvina  ED03    0.9084178
+#  4  Corvina    OW    1.0368249
+#  5     Sole  ED03    0.6766732
+#  6     Sole    OW    0.9941262
+#  7  Sardine  ED03    0.8120379
+#  8  Sardine    OW    0.9379932
+#  9     Tuna  ED03    0.9570930
+# 10     Tuna    OW    0.9556588
+
+group_by(est_hcr_vals, sp) %>%
+				 summarize(median_bbmsy = median(BBmsy_current))
+#         sp median_bbmsy
+#     <fctr>        <dbl>
+# 1 Rockfish    0.8975811
+# 2  Corvina    0.9969086
+# 3     Sole    0.8758754
+# 4  Sardine    0.8968943
+# 5     Tuna    0.9565226
+
+
+group_by(HCR_target_vals_wide, sp, ed) %>%
+	summarise(min = min(Error_BBmsy),
+						median = median(Error_BBmsy),
+						max = max(Error_BBmsy))
+#          sp    ed        min    median       max
+#      <fctr> <chr>      <dbl>     <dbl>     <dbl>
+#  1 Rockfish  ED03 -0.7873065 1.0741327 12.843672
+#  2 Rockfish    OW -0.7273390 0.2960295  5.490598
+#  3  Corvina  ED03 -0.8356284 1.2617774 16.773860
+#  4  Corvina    OW -0.7641497 0.5036828  6.493223
+#  5     Sole  ED03 -0.8718052 1.1408544 21.940113
+#  6     Sole    OW -0.8754468 0.5211906  3.176500
+#  7  Sardine  ED03 -0.9253776 0.7499157 13.331648
+#  8  Sardine    OW -0.9508795 0.1156831  5.375930
+#  9     Tuna  ED03 -0.8821665 0.5114135  8.966419
+# 10     Tuna    OW -0.8425453 1.1481757 21.072366
+
+group_by(HCR_target_vals_wide, sp) %>%
+	summarise(median = median(Error_BBmsy),
+						mean = mean(Error_BBmsy))
+#         sp    median      mean
+#     <fctr>     <dbl>     <dbl>
+# 1 Rockfish 0.5458885 0.8369597
+# 2  Corvina 0.8215862 1.1572171
+# 3     Sole 0.7669715 1.0977853
+# 4  Sardine 0.3501139 0.6359794
+# 5     Tuna 0.7710780 1.3022513
+
+summary(HCR_target_vals_wide$Error_BBmsy)  
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+# -0.9509  0.1261  0.6487  1.0060  1.4010 21.9400 
+   
+HCR_target_vals_wide %>% filter(ed == "OW") %>%
+	summarise(med_prop_error_bbmsy = median(Error_BBmsy))
+#0.435
+
+HCR_target_vals_wide %>% filter(ed == "ED03") %>%
+	summarise(med_prop_error_bbmsy = median(Error_BBmsy))
+#0.965
+
+```
+\newpage
+
+```{r error_target_UR_HCRs, fig.width = 4, fig.height = 6}
+#Target HCRs - calculate error and plot
+
+HCR_target_vals_UR <- readRDS(file=paste0("data-generated/HCR_target_vals_dat_UR.rds"))
+HCR_target_vals_UR$sp <- factor(HCR_target_vals_UR$sp, levels = c("BC","CR","PS","SA","SJ"),labels = c("Rockfish","Corvina","Sole","Sardine","Tuna"))
+
+true_hcr_vals_UR <- filter(HCR_target_vals_UR, Model == "true") %>%
+	filter(buffer == 1)
+est_hcr_vals_UR <-filter(HCR_target_vals_UR, Model == "estimated") %>%
+	filter(buffer == 1)
+
+HCR_target_vals_UR_wide <-merge(true_hcr_vals_UR,est_hcr_vals_UR,by=c("sp", "ts", "ed", "buffer","j", "filename_buf")) %>%
+	filter(buffer == 1)
+
+#x = true, y = estimated
+HCR_target_vals_UR_wide$Error_BBmsy <- (HCR_target_vals_UR_wide$BBmsy_current.y-HCR_target_vals_UR_wide$BBmsy_current.x)/HCR_target_vals_UR_wide$BBmsy_current.x
+
+true_bbmsy_plot <- ggplot(true_hcr_vals_UR, aes(BBmsy_current, colour = sp)) +
+geom_density(aes(linetype = sp)) + 
+	ggtitle(expression("a) True B/B"[MSY])) + 
+	xlab(expression("B/B"[MSY])) +
+	#scale_x_continuous(limits = c(0, 3)) +
+	geom_vline(xintercept=1,linetype="dotted")+
+	coord_cartesian(xlim=c(0, 3)) +
+	facet_grid(~ed) +
+	ylab("Density") +
+	theme_sleek_hist()
+ 
+est_bbmsy_plot <- ggplot(est_hcr_vals_UR, aes(BBmsy_current, colour = sp)) +
+geom_density(aes(linetype = sp)) + ggtitle(expression("b) Estimated UR B/B"[MSY])) +
+	coord_cartesian(xlim=c(0, 3)) +
+	#scale_x_continuous(limits = c(0,3))+
+	geom_vline(xintercept=1,linetype="dotted")+
+	facet_grid(~ed) +
+	xlab(expression("B/B"[MSY])) +
+	ylab("Density") +
+	theme_sleek_hist()
+
+error_bbmsy_plot <- ggplot(HCR_target_vals_UR_wide, aes(Error_BBmsy, colour = sp)) +
+geom_density(aes(linetype = sp)) + ggtitle(expression("c) Prop. Error for UR B/B"[MSY])) +
+#scale_x_continuous(limits = c(-1, 10)) +
+coord_cartesian(xlim=c(-1, 10)) +
+	geom_vline(xintercept=0,linetype="dotted")+
+	facet_grid(~ed) + 
+	xlab(expression("Proportional error B/B"[MSY])) +
+	ylab("Density") +
+	theme_sleek_hist() 
+
+png("plots/error_UR_bbmsy.png",width = 7, height = 10, units = "in", res = 600)
+#pdf("plots/error_UR_bbmsy.pdf",width = 7, height = 10)
+grid.arrange(true_bbmsy_plot, est_bbmsy_plot, error_bbmsy_plot, ncol=1)
+dev.off()
+
+HCR_target_vals_UR_wide %>% dplyr::group_by(as.factor(ed)) %>% 
+	dplyr::summarise(max_BBmsy = max(Error_BBmsy),
+									BBmsy_over_10 = sum(Error_BBmsy > 10))  
+#   `as.factor(ed)` max_BBmsy BBmsy_over_10
+#            <fctr>     <dbl>         <int>
+# 1            ED03  20.38000            20
+# 2              OW  28.30901            13
+#similar to B/Bmsy with dlms - just higher PE for OW and more > 10 for ED03 
+
+true_hcr_vals_UR_clean <- filter(true_hcr_vals_UR, buffer == "1")
+summary(true_hcr_vals_UR_clean$BBmsy_current)
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+# 0.02664 0.35990 0.56900 0.65800 0.84360 4.69100 
+# same as true using dlms - as expected.
+
+(prop_stocks_above_bmsy <- sum(true_hcr_vals_UR_clean$BBmsy_current > 1)/length(true_hcr_vals_UR_clean$BBmsy_current))
+#1015/6000
+# 16.9%
+#same as true bbmsy using dlms - good
+
+group_by(est_hcr_vals_UR, sp, ed) %>%
+				 summarize(median_bbmsy = median(BBmsy_current))
+#          sp    ed median_bbmsy
+#      <fctr> <chr>        <dbl>
+#  1 Rockfish  ED03    0.8745909 (higher)
+#  2 Rockfish    OW    1.0450478 (higher)
+#  3  Corvina  ED03    0.7388327 (lower)
+#  4  Corvina    OW    0.8306404 (lower)
+#  5     Sole  ED03    0.7365770 (higher)
+#  6     Sole    OW    1.1417908 (higher)
+#  7  Sardine  ED03    0.9340490 (higher)
+#  8  Sardine    OW    1.0994741 (higher)
+#  9     Tuna  ED03    0.8796354 (lower)
+# 10     Tuna    OW    0.8655788 (lower)
+
+# with dlm no UR
+# group_by(est_hcr_vals, sp, ed) %>%
+# 				 summarize(median_bbmsy = median(BBmsy_current))
+# #          sp    ed median_bbmsy
+# #      <fctr> <chr>        <dbl>
+# #  1 Rockfish  ED03    0.8155146
+# #  2 Rockfish    OW    0.9616448
+# #  3  Corvina  ED03    0.9084178
+# #  4  Corvina    OW    1.0368249
+# #  5     Sole  ED03    0.6766732
+# #  6     Sole    OW    0.9941262
+# #  7  Sardine  ED03    0.8120379
+# #  8  Sardine    OW    0.9379932
+# #  9     Tuna  ED03    0.9570930
+# # 10     Tuna    OW    0.9556588
+# 
+group_by(est_hcr_vals_UR, sp) %>%
+				 summarize(median_bbmsy = median(BBmsy_current))
+#        sp median_bbmsy
+#     <fctr>        <dbl>
+# 1 Rockfish    0.9440605 (higher)
+# 2  Corvina    0.7907719 (lower)
+# 3     Sole    0.9484026 (higher)
+# 4  Sardine    1.0191089 (higher)
+# 5     Tuna    0.8769201 (lower)
+#DLM no UR
+# group_by(est_hcr_vals, sp) %>%
+# 				 summarize(median_bbmsy = median(BBmsy_current))
+# #         sp median_bbmsy
+# #     <fctr>        <dbl>
+# # 1 Rockfish    0.8975811
+# # 2  Corvina    0.9969086
+# # 3     Sole    0.8758754
+# # 4  Sardine    0.8968943
+# # 5     Tuna    0.9565226
+
+#moderate UR with dlm had higher estimates of BBmsy and higher prop error
+#high UR with dlm haad lower estimate of B/Bmsy and 
+
+group_by(HCR_target_vals_UR_wide, sp, ed) %>%
+	summarise(min = min(Error_BBmsy),
+						median = median(Error_BBmsy),
+						max = max(Error_BBmsy))
+#     <fctr> <chr>      <dbl>     <dbl>     <dbl>
+#  1 Rockfish  ED03 -0.5070852 1.1470760 18.316441 higher than dlm with no UR (comparision below)
+#  2 Rockfish    OW -0.6829007 0.4377523  5.680067 higher
+#  3  Corvina  ED03 -0.6074583 0.9203294 16.289508 higher/lower/lower
+#  4  Corvina    OW -0.6552263 0.2489659  3.936844 higher/lower/lower
+#  5     Sole  ED03 -0.2701260 1.2095131 20.380000 higher/higher/lower
+#  6     Sole    OW -0.3904041 0.7164451  3.750729 higher/higher/lower
+#  7  Sardine  ED03 -0.6293344 0.8260324 15.153013 higher/higher/higher
+#  8  Sardine    OW -0.5558754 0.4066431  5.255892 higher/higher/lower
+#  9     Tuna  ED03 -0.6244439 0.4969136 11.861308 higher/lower/higher
+# 10     Tuna    OW -0.6116646 1.1850599 28.309015 higher
+
+## From DLMs with No UR
+#          sp    ed        min    median       max
+#      <fctr> <chr>      <dbl>     <dbl>     <dbl>
+#  1 Rockfish  ED03 -0.7873065 1.0741327 12.843672
+#  2 Rockfish    OW -0.7273390 0.2960295  5.490598
+#  3  Corvina  ED03 -0.8356284 1.2617774 16.773860
+#  4  Corvina    OW -0.7641497 0.5036828  6.493223
+#  5     Sole  ED03 -0.8718052 1.1408544 21.940113
+#  6     Sole    OW -0.8754468 0.5211906  3.176500
+#  7  Sardine  ED03 -0.9253776 0.7499157 13.331648
+#  8  Sardine    OW -0.9508795 0.1156831  5.375930
+#  9     Tuna  ED03 -0.8821665 0.5114135  8.966419
+# 10     Tuna    OW -0.8425453 1.1481757 21.072366
+
+group_by(HCR_target_vals_UR_wide, sp) %>%
+				 summarize(median_PEbbmsy = median(Error_BBmsy),
+				 					mean_PEbbmsy = mean(Error_BBmsy))
+#         sp median_PEbbmsy mean_PEbbmsy
+#     <fctr>          <dbl>        <dbl>
+# 1 Rockfish      0.7618372    1.0863369  higher than PE dlm with NO UR
+# 2  Corvina      0.5539340    0.9163809	lower
+# 3     Sole      0.9336709    1.3118930  higher
+# 4  Sardine      0.5774934    0.8360136  higher
+# 5     Tuna      0.7509556    1.3937105  lower/higher
+
+summary(HCR_target_vals_UR_wide$Error_BBmsy)  
+#  Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+# -0.6829  0.2388  0.7262  1.1090  1.4010 28.3100 
+# max UR prop error is bigger than just with DLM
+# median and mean UR prop errors are bigger than DLM. 
+
+###summary(HCR_target_vals_wide$Error_BBmsy)  
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+# -0.9509  0.1261  0.6487  1.0060  1.4010 21.9400 
+
+
+HCR_target_vals_UR_wide %>% group_by(ed) %>%
+	summarise(med_prop_error_bbmsy = median(Error_BBmsy))
+#      ed med_prop_error_bbmsy
+# 1  ED03            0.9287039 # smaller than DLM (0.965)
+# 2    OW            0.5506572 # bigger than DLM - 0.435
+
+```
+
+
+### Harvest Ratio at last 5 years of simulations, before management
+Note: estimated harvest ratio = catch/(mean biomass from cmsy and comsir estimates) of last 5 years 
+
+* species with shorter life histories, i.e. skipjack, bullet and frigate tunas and sardine have higher current harvest ratios (i.e proportion of population caught)
+* WHAT IS GOING ON WITH SARDINES TRUE HARVEST RATIO??? need to check that?!
+* However, the estimates from the data-limited models CMSY and COMSIR does not pick this up - and underestimates the current exploitation ratio for these short lived species. 
+* For other species - sole, rockfish and corvina, the proportional error is not as bad. 
+
+```{r HR_curr_plots, fig.width = 4, fig.height = 6}
+#run previous chunk {FigS1_bbmsy_error} first.
+
+true_HR_curr_plot <- ggplot(true_hcr_vals, aes(HR_curr, colour = sp)) +
+geom_density() + ggtitle("True harvest ratio") +
+	scale_x_continuous(limits = c(0, 1))  +
+	facet_wrap(~ed, scales = "free")
+ 
+est_HR_curr_plot <- ggplot(est_hcr_vals, aes(HR_curr, colour = sp)) +
+geom_density() + ggtitle("Estimated harvest ratio") +
+	scale_x_continuous(limits = c(0, 1)) +
+	facet_grid(~ed)
+
+HCR_target_vals_wide$error_HR_curr <- (HCR_target_vals_wide$HR_curr.y-HCR_target_vals_wide$HR_curr.x)/HCR_target_vals_wide$HR_curr.x
+
+error_HR_curr_plot <- ggplot(HCR_target_vals_wide, aes(error_HR_curr, colour = sp)) +
+	geom_density(aes(linetype=sp)) + 
+	ggtitle("c) Prop. Error for harvest ratio") +
+	scale_x_continuous(limits = c(-2, 10)) + 
+	#coord_cartesian(xlim=c(-2, 10)) +
+	geom_vline(xintercept=0,linetype="dotted") +
+	xlab("Proportional error") +
+	facet_grid(~ed) + theme_sleek_hist()
+
+#pdf("plots/harvest_ratio_error.pdf", width = 6, height = 8)
+grid.arrange(true_HR_curr_plot, est_HR_curr_plot, error_HR_curr_plot, ncol=1)
+#dev.off()
+
+#checking sardine true harvest ratio
+sardine_true_dat <- filter(HCR_target_vals, sp == "SA") %>%
+	filter(ed == "OW") %>% filter(Model == "true")
+ggplot(sardine_true_dat, aes(HR_curr)) +
+	geom_density() 
+#not sure why the variance in this true harvest ratio is so small. 
+
+```
+\newpage
+
+### Error in Fmsy and yield msy estimates 
+
+* MSY (yield msy) is mostly well estimated by cmsy and comsir. However, there are lots of outliers - with huge proportional errors. Need to investigate which scenarios these are for. 
+
+* the cmsy and comsir models are most likely to overestimate Fmsy for Corvina reina and petrale sole. Fmsy for bocaccio is better estimated than other species, but still mostly overestimated. Sardine Fmsy is mostly underestimated. 
+
+* Fmsy for Bullet and frigate tunas and Skipjack tunas are consistently and severely underestimated. 
+
+* Most species exhibit a bimodal distribution in the Fmsy estimates
+
+```{r error_msy_estimates, eval = TRUE,  fig.width = 8, fig.height = 4}
+HCR_target_vals_wide$error_Fmsy <- (HCR_target_vals_wide$Fmsy.y-HCR_target_vals_wide$Fmsy.x)/HCR_target_vals_wide$Fmsy.x
+
+HCR_target_vals_wide$error_Ymsy <- (HCR_target_vals_wide$Ymsy.y-HCR_target_vals_wide$Ymsy.x)/HCR_target_vals_wide$Ymsy.x
+
+error_Ymsy_plot <- ggplot(HCR_target_vals_wide, aes(error_Ymsy, colour = sp)) +
+	geom_density(aes(linetype=sp)) + ggtitle("a) Prop. Error MSY") +
+	scale_x_continuous(limits = c(-2, 10)) + 
+	#coord_cartesian(xlim=c(-2, 10)) +
+	facet_grid(~ed) +
+	geom_vline(xintercept=0, linetype="dotted") +
+	xlab("Proportional error") +
+	facet_grid(~ed) + theme_sleek_hist()
+
+error_Fmsy_plot <- ggplot(HCR_target_vals_wide, aes(error_Fmsy, colour = sp)) +
+	geom_density(aes(linetype=sp)) + ggtitle(expression("b) Prop. Error F"[MSY])) + facet_grid(~ed) +
+	#scale_x_continuous(limits = c(-2, 10)) + 
+	#coord_cartesian(xlim=c(-2, 10)) +
+	geom_vline(xintercept=0,linetype="dotted") +
+	xlab("Proportional error") +
+	facet_grid(~ed) + theme_sleek_hist()
+
+# error_Fmsy_plot_noSJ <- HCR_target_vals_wide %>%
+# 	filter(!sp == "SJ") %>%
+# 	ggplot(aes(error_Fmsy, colour = sp)) +
+# geom_density() + ggtitle("Prop Error Fmsy, removed skipjack") +
+# #scale_x_continuous(limits = c(-2, 10)) + 
+# geom_vline(xintercept=0,linetype="dotted")
+
+png("plots/FigS4_prop_error_msy&Fmsy&HR_curr.png", width = 8, height = 10, units = "in", res = 600)
+#pdf("plots/FigS4_prop_error_msy&Fmsy&HR_curr.pdf", width = 8, height = 10)
+grid.arrange(error_Ymsy_plot, error_Fmsy_plot, error_HR_curr_plot, ncol=1)
+dev.off()
+
+#test for stocks with high PE of MSY
+test <- filter(HCR_target_vals_wide,error_Ymsy > 10)
+summary(as.factor(test$sp))
+
+# sp = "SJ"
+# j = 907
+# ts= 20
+# ed = "ED03"
+# 	load(paste0("data-raw/sims-", sp,"-",ed,".Rdata"))
+# 		filename <- paste0(sp,"_TS",ts,"_",ed,"_rep",j)
+# 		mse_runs <- readRDS(file=paste0("data-generated/mse_results/",ed,"/mse_projection_",filename,".rds"))
+# 
+# results.vec <- FLStocks('Effort 4010 HCR'=mse_runs$stock_proj_HR4010,'TAC 4010 HCR'=mse_runs$stock_proj_TAC4010, 'Effort sw HCR'=mse_runs$stock_proj_HRsw, 'TAC sw HCR'=mse_runs$stock_proj_TACsw, 'BAU' = mse_runs$stock_proj_BAU)
+# proj_yr = 5
+# years = (60-(ts-1)):(60+proj_yr)
+# 
+# 
+# plot(results.vec) + geom_vline(xintercept = 60, linetype = "dashed")
+
+HCR_target_vals_wide %>% dplyr::group_by(as.factor(ed)) %>% 
+	dplyr::summarise(median_Ymsy = median(error_Ymsy),
+									 max_Ymsy = max(error_Ymsy),
+									 median_Fmsy = median(error_Fmsy),
+									 max_Fmsy = max(error_Fmsy),
+									 max_HR_curr = max(error_HR_curr),
+									 Ymsy_over_10 = sum(error_Ymsy > 10))
+								#	 HR_over_10 = sum(error_HR_curr > 10))  
+#   `as.factor(ed)` median_Ymsy max_Ymsy median_Fmsy max_Fmsy max_HR_curr Ymsy_over_10
+# 1            ED03  0.01625107 27.49765 -0.16032537 1.614772   11593.973702       8
+# 2              OW  0.26523719 12.20989 -0.05749924 1.509070   1.863335           4
+
+HCR_target_vals_wide %>% dplyr::group_by(as.factor(sp)) %>% 
+	dplyr::summarise(median_Ymsy = median(error_Ymsy),
+									 max_Ymsy = max(error_Ymsy),
+									 median_Fmsy = median(error_Fmsy),
+									 max_Fmsy = max(error_Fmsy))
+#   `as.factor(sp)` median_Ymsy  max_Ymsy median_Fmsy   max_Fmsy
+# 1        Rockfish  0.10913605 15.083541 -0.14310942  0.2182560
+# 2         Corvina  0.07753435 27.497653  0.06063631  0.4615700
+# 3            Sole  0.26054420  8.885604  0.69649364  1.6147721
+# 4         Sardine  0.19188085 19.759123 -0.16159494  0.2293177
+# 5            Tuna -0.01368784 15.664635 -0.69432584 -0.5199456
+
+summary(HCR_target_vals_wide$Error_BBmsy)
+summary(HCR_target_vals_wide$error_Ymsy)
+summary(HCR_target_vals_wide$error_Fmsy)
+
+# > summary(HCR_target_vals_wide$Error_BBmsy)
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+# -0.9509  0.1261  0.6487  1.0060  1.4010 21.9400 
+# > summary(HCR_target_vals_wide$error_Ymsy)
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+# -0.9998 -0.1896  0.1410  0.4424  0.6238 27.5000 
+# > summary(HCR_target_vals_wide$error_Fmsy)
+#     Min.  1st Qu.   Median     Mean  3rd Qu.     Max. 
+# -0.83110 -0.41710 -0.09398 -0.06442  0.14520  1.61500 
+
+```
+
+```{r error_msy_estimates_UR, eval = TRUE,  fig.width = 8, fig.height = 4}
+HCR_target_vals_UR_wide$error_Fmsy <- (HCR_target_vals_UR_wide$Fmsy.y-HCR_target_vals_UR_wide$Fmsy.x)/HCR_target_vals_UR_wide$Fmsy.x
+
+HCR_target_vals_UR_wide$error_Ymsy <- (HCR_target_vals_UR_wide$Ymsy.y-HCR_target_vals_UR_wide$Ymsy.x)/HCR_target_vals_UR_wide$Ymsy.x
+
+HCR_target_vals_UR_wide$error_HR_curr <- (HCR_target_vals_UR_wide$HR_curr.y-HCR_target_vals_UR_wide$HR_curr.x)/HCR_target_vals_UR_wide$HR_curr.x
+
+error_Ymsy_plot <- ggplot(HCR_target_vals_UR_wide, aes(error_Ymsy, colour = sp)) +
+	geom_density(aes(linetype=sp)) + ggtitle("a) Prop. Error MSY") +
+	scale_x_continuous(limits = c(-2, 10)) + 
+	#coord_cartesian(xlim=c(-2, 10)) +
+	facet_grid(~ed) +
+	geom_vline(xintercept=0, linetype="dotted") +
+	xlab("Proportional error") +
+	facet_grid(~ed)
+
+error_Fmsy_plot <- ggplot(HCR_target_vals_UR_wide, aes(error_Fmsy, colour = sp)) +
+	geom_density(aes(linetype=sp)) + ggtitle(expression("b) Prop. Error F"[MSY])) + facet_grid(~ed) +
+	#scale_x_continuous(limits = c(-2, 10)) + 
+	#coord_cartesian(xlim=c(-2, 10)) +
+	geom_vline(xintercept=0,linetype="dotted") +
+	xlab("Proportional error") +
+	facet_grid(~ed) 
+
+error_HR_curr_plot <- ggplot(HCR_target_vals_UR_wide, aes(error_HR_curr, colour = sp)) +
+	geom_density(aes(linetype=sp)) + 
+	ggtitle("c) Prop. Error for harvest ratio") +
+	scale_x_continuous(limits = c(-2, 10)) + 
+	#coord_cartesian(xlim=c(-2, 10)) +
+	geom_vline(xintercept=0,linetype="dotted") +
+	xlab("Proportional error") +
+	facet_grid(~ed) 
+
+png("plots/prop_error_msy&Fmsy&HR_curr_UR.png", width = 8, height = 10, units = "in", res = 600)
+#pdf("plots/prop_error_msy&Fmsy&HR_curr_UR.pdf", width = 8, height = 10)
+grid.arrange(error_Ymsy_plot, error_Fmsy_plot, error_HR_curr_plot, ncol=1)
+dev.off()
+
+#test for stocks with high PE of MSY
+test <- filter(HCR_target_vals_UR_wide,error_Ymsy > 10)
+summary(as.factor(test$sp))
+
+HCR_target_vals_UR_wide %>% dplyr::group_by(as.factor(sp)) %>% 
+	dplyr::summarise(median_Ymsy = median(error_Ymsy),
+									 max_Ymsy = max(error_Ymsy),
+									 median_Fmsy = median(error_Fmsy),
+									 max_Fmsy = max(error_Fmsy),
+									 Ymsy_over_10 = sum(error_Ymsy > 10))
+
+#  DLM UR prop error
+#   `as.factor(sp)`  median_Ymsy  max_Ymsy 						median_Fmsy   max_Fmsy Ymsy_over_10
+# 1        Rockfish -0.113430036 12.083659 	lower			-0.14223936  0.2042788            1   same
+# 2         Corvina -0.464100288 13.274371	lower			 0.06539306  0.4860192            1		same
+# 3            Sole  0.006374958  6.815337	lower			 0.69442165  1.6332546            0   same
+# 4         Sardine -0.044282544 15.704415	lower		 -0.16245452  0.2567569            1    same
+# 5            Tuna -0.506744370  7.412479	lower		 -0.69518330 -0.5157091            0    same
+# 
+## DLM no UR prop error
+#   `as.factor(sp)` median_Ymsy  max_Ymsy median_Fmsy   max_Fmsy
+# 1        Rockfish  0.10913605 15.083541 -0.14310942  0.2182560
+# 2         Corvina  0.07753435 27.497653  0.06063631  0.4615700
+# 3            Sole  0.26054420  8.885604  0.69649364  1.6147721
+# 4         Sardine  0.19188085 19.759123 -0.16159494  0.2293177
+# 5            Tuna -0.01368784 15.664635 -0.69432584 -0.5199456
+
+
+summary(HCR_target_vals_UR_wide$Error_BBmsy)
+summary(HCR_target_vals_UR_wide$error_Ymsy)
+summary(HCR_target_vals_UR_wide$error_Fmsy)
+
+# > summary(HCR_target_vals_UR_wide$Error_BBmsy)
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+# -0.6829  0.2388  0.7262  1.1090  1.4010 28.3100 
+# > summary(HCR_target_vals_UR_wide$error_Ymsy)
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+# -0.9999 -0.4959 -0.2196 -0.0114  0.1522 15.7000 
+# > summary(HCR_target_vals_UR_wide$error_Fmsy)
+#     Min.  1st Qu.   Median     Mean  3rd Qu.     Max. 
+# -0.83340 -0.41660 -0.09479 -0.06416  0.14410  1.63300 
+
+```
+
+\newpage 
+
+###Proportional error for HCR targets
+
+These plots show how accurate the harvest control rule target values based on the ensemble model estimates are compared to if the HCR was applied to the 'true' bbmsy and fmsy and msy estimates, before any management occurs. 
+
+- TODO: need to fix Mean Inf and Max Inf errors? Caused when estimated target value is a positive number and the true target value is zero - happens quite often.  Make these into hurdle plots
+
+- All harvest control rules based on ensemble estimates are more often overestimating target value - which could lead to overfishing and overfished populations. This is except for harvest rate HCRs for skipjack and bullet and frigate tunas
+
+```{r hcr_prop_error}
+HCR_target_vals_wide$error_HR4010 <- (HCR_target_vals_wide$HR_4010.y-HCR_target_vals_wide$HR_4010.x)/HCR_target_vals_wide$HR_4010.x
+HCR_target_vals_wide$error_TAC4010 <- (HCR_target_vals_wide$TAC_4010.y-HCR_target_vals_wide$TAC_4010.x)/HCR_target_vals_wide$TAC_4010.x
+HCR_target_vals_wide$error_HRsw <- (HCR_target_vals_wide$HR_sw.y-HCR_target_vals_wide$HR_sw.x)/HCR_target_vals_wide$HR_sw.x
+HCR_target_vals_wide$error_TACsw <- (HCR_target_vals_wide$TAC_sw.y-HCR_target_vals_wide$TAC_sw.x)/HCR_target_vals_wide$TAC_sw.x
+
+error_HR4010_plot <- ggplot(HCR_target_vals_wide, aes(error_HR4010, colour = sp)) +
+geom_density(aes(linetype=sp)) + ggtitle("a) Effort 40-10 HCR") + #coord_cartesian(xlim=c(-2, 25)) +
+scale_x_continuous(limits = c(-2, 10)) + 
+geom_vline(xintercept=0,linetype="dotted") +
+	xlab("Proportional error") +
+	ylab("Density") +
+	facet_grid(~ed) +
+	theme_sleek_hist()
+
+error_HRsw_plot <- ggplot(HCR_target_vals_wide, aes(error_HRsw, colour = sp)) +
+geom_density(aes(linetype=sp)) + ggtitle("b) Effort Step HCR") +
+#coord_cartesian(xlim=c(-2, 25)) +
+scale_x_continuous(limits = c(-2, 10)) + 
+geom_vline(xintercept=0,linetype="dotted") +
+	xlab("Proportional error") +
+	ylab("Density") +
+	facet_grid(~ed) +
+	theme_sleek_hist()
+
+error_TAC4010_plot <- ggplot(HCR_target_vals_wide, aes(error_TAC4010, colour = sp)) +
+geom_density(aes(linetype=sp)) + ggtitle("c) Catch 40-10 HCR") +
+#coord_cartesian(xlim=c(-2, 25)) +
+scale_x_continuous(limits = c(-2, 10)) +
+geom_vline(xintercept=0, linetype="dotted") +
+	facet_grid(~ed) +
+	xlab("Proportional error") +
+	ylab("Density") +
+	theme_sleek_hist()
+
+error_TACsw_plot <- ggplot(HCR_target_vals_wide, aes(error_TACsw, colour = sp)) +
+geom_density(aes(linetype=sp)) + ggtitle("d) Catch Step HCR") +
+#coord_cartesian(xlim=c(-2, 25)) +
+scale_x_continuous(limits = c(-2, 10)) +
+geom_vline(xintercept=0, linetype="dotted") +
+	xlab("Proportional error") +
+	ylab("Density") +
+	facet_grid(~ed) +
+	theme_sleek_hist()
+
+pdf("plots/FigS3_hcr_target_error.pdf", width = 6, height = 8)
+grid.arrange(error_HR4010_plot, error_HRsw_plot, error_TAC4010_plot, error_TACsw_plot, ncol=1)
+dev.off()
+
+png("plots/FigS3_hcr_target_error.png", width = 6, height = 8, units = "in",res = 600)
+grid.arrange(error_HR4010_plot, error_HRsw_plot, error_TAC4010_plot, error_TACsw_plot, ncol=1)
+dev.off()
+
+summary(HCR_target_vals_wide$error_HR4010)
+summary(HCR_target_vals_wide$error_TAC4010)
+summary(HCR_target_vals_wide$error_HRsw)
+summary(HCR_target_vals_wide$error_TACsw)
+
+# > summary(HCR_target_vals_wide$error_HR4010)
+#     Min.  1st Qu.   Median     Mean  3rd Qu.     Max.     NA's 
+# -1.00000 -0.09455  0.41250      Inf  2.10900      Inf        1 
+# > summary(HCR_target_vals_wide$error_TAC4010)
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max.    NA's 
+# -1.0000  0.3212  1.0520     Inf  3.0310     Inf       1 
+# > summary(HCR_target_vals_wide$error_HRsw)
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max.    NA's 
+# -1.0000 -0.0867  3.0610     Inf     Inf     Inf     706 
+# > summary(HCR_target_vals_wide$error_TACsw)
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max.    NA's 
+# -1.0000  0.4629  4.9230     Inf     Inf     Inf     706 
+
+### Plots for HCRs where true = 0 (i.e. no fishing should happen)
+# proportional error causes Inf values. 
+# NAs are caused by true = 0 and est = 0.
+
+par(mfrow = c(2,2))
+HR4010_0 <- filter(HCR_target_vals_wide, HR_4010.x == 0)
+length(HR4010_0$error_HR4010)
+hist(HR4010_0$HR_4010.y, breaks = 30)
+
+HRsw_0 <- filter(HCR_target_vals_wide, HR_sw.x == 0)
+length(HRsw_0$error_HRsw)
+hist(HRsw_0$HR_sw.y, breaks = 30)
+
+TAC4010_0 <- filter(HCR_target_vals_wide, TAC_4010.x == 0)
+length(TAC4010_0$error_TAC4010)
+hist(TAC4010_0$TAC_4010.y, breaks = 30)
+
+TACsw_0 <- filter(HCR_target_vals_wide, TAC_sw.x == 0)
+length(TACsw_0$error_TACsw)
+hist(TACsw_0$TAC_sw.y, breaks = 30)
+
+
+```
+
+
+```{r hcr_prop_error_UR}
+HCR_target_vals_UR_wide$error_HR4010 <- (HCR_target_vals_UR_wide$HR_4010.y-HCR_target_vals_UR_wide$HR_4010.x)/HCR_target_vals_UR_wide$HR_4010.x
+HCR_target_vals_UR_wide$error_TAC4010 <- (HCR_target_vals_UR_wide$TAC_4010.y-HCR_target_vals_UR_wide$TAC_4010.x)/HCR_target_vals_UR_wide$TAC_4010.x
+HCR_target_vals_UR_wide$error_HRsw <- (HCR_target_vals_UR_wide$HR_sw.y-HCR_target_vals_UR_wide$HR_sw.x)/HCR_target_vals_UR_wide$HR_sw.x
+HCR_target_vals_UR_wide$error_TACsw <- (HCR_target_vals_UR_wide$TAC_sw.y-HCR_target_vals_UR_wide$TAC_sw.x)/HCR_target_vals_UR_wide$TAC_sw.x
+
+error_HR4010_plot <- ggplot(HCR_target_vals_UR_wide, aes(error_HR4010, colour = sp)) +
+geom_density(aes(linetype=sp)) + ggtitle("a) Effort 40-10 HCR") + #coord_cartesian(xlim=c(-2, 25)) +
+scale_x_continuous(limits = c(-2, 10)) + 
+geom_vline(xintercept=0,linetype="dotted") +
+	xlab("Proportional error") +
+	ylab("Density") +
+	facet_grid(~ed) +
+	theme_sleek_hist()
+
+error_HRsw_plot <- ggplot(HCR_target_vals_UR_wide, aes(error_HRsw, colour = sp)) +
+geom_density(aes(linetype=sp)) + ggtitle("b) Effort Step HCR") +
+#coord_cartesian(xlim=c(-2, 25)) +
+scale_x_continuous(limits = c(-2, 10)) + 
+geom_vline(xintercept=0,linetype="dotted") +
+	xlab("Proportional error") +
+	ylab("Density") +
+	facet_grid(~ed) +
+	theme_sleek_hist()
+
+error_TAC4010_plot <- ggplot(HCR_target_vals_UR_wide, aes(error_TAC4010, colour = sp)) +
+geom_density(aes(linetype=sp)) + ggtitle("c) Catch 40-10 HCR") +
+#coord_cartesian(xlim=c(-2, 25)) +
+scale_x_continuous(limits = c(-2, 10)) +
+geom_vline(xintercept=0, linetype="dotted") +
+	facet_grid(~ed) +
+	xlab("Proportional error") +
+	ylab("Density") +
+	theme_sleek_hist()
+
+error_TACsw_plot <- ggplot(HCR_target_vals_UR_wide, aes(error_TACsw, colour = sp)) +
+geom_density(aes(linetype=sp)) + ggtitle("d) Catch Step HCR") +
+#coord_cartesian(xlim=c(-2, 25)) +
+scale_x_continuous(limits = c(-2, 10)) +
+geom_vline(xintercept=0, linetype="dotted") +
+	xlab("Proportional error") +
+	ylab("Density") +
+	facet_grid(~ed) +
+	theme_sleek_hist()
+
+pdf("plots/hcr_target_errorUR.pdf", width = 6, height = 8)
+grid.arrange(error_HR4010_plot, error_HRsw_plot, error_TAC4010_plot, error_TACsw_plot, ncol=1)
+dev.off()
+
+png("plots/hcr_target_error_UR.png", width = 6, height = 8, units = "in",res = 600)
+grid.arrange(error_HR4010_plot, error_HRsw_plot, error_TAC4010_plot, error_TACsw_plot, ncol=1)
+dev.off()
+
+summary(HCR_target_vals_UR_wide$error_HR4010)
+summary(HCR_target_vals_UR_wide$error_TAC4010)
+summary(HCR_target_vals_UR_wide$error_HRsw)
+summary(HCR_target_vals_UR_wide$error_TACsw)
+
+# > summary(HCR_target_vals_UR_wide$error_HR4010)
+#     Min.  1st Qu.   Median     Mean  3rd Qu.     Max. 
+# -0.87820 -0.05819  0.47310      Inf  2.11900      Inf 					higher
+# > summary(HCR_target_vals_UR_wide$error_TAC4010)
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+# -0.9999 -0.1196  0.4788     Inf  1.8050     Inf 								lower
+# > summary(HCR_target_vals_UR_wide$error_HRsw)
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max.    NA's 
+#  -1.000   0.023     Inf     Inf     Inf     Inf     378 				higher
+# > summary(HCR_target_vals_UR_wide$error_TACsw)
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max.    NA's 
+# -1.0000  0.1925     Inf     Inf     Inf     Inf     378 				higher (lower?)
+   
+   
+# > summary(HCR_target_vals_wide$error_HR4010)
+#     Min.  1st Qu.   Median     Mean  3rd Qu.     Max.     NA's 
+# -1.00000 -0.09455  0.41250      Inf  2.10900      Inf        1 
+# > summary(HCR_target_vals_wide$error_TAC4010)
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max.    NA's 
+# -1.0000  0.3212  1.0520     Inf  3.0310     Inf       1 
+# > summary(HCR_target_vals_wide$error_HRsw)
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max.    NA's 
+# -1.0000 -0.0867  3.0610     Inf     Inf     Inf     706 
+# > summary(HCR_target_vals_wide$error_TACsw)
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max.    NA's 
+# -1.0000  0.4629  4.9230     Inf     Inf     Inf     706 
+
+### Plots for HCRs where true = 0 (i.e. no fishing should happen)
+# proportional error causes Inf values. 
+# NAs are caused by true = 0 and est = 0.
+
+par(mfrow = c(2,2))
+HR4010_0 <- filter(HCR_target_vals_UR_wide, HR_4010.x == 0)
+length(HR4010_0$error_HR4010)
+hist(HR4010_0$HR_4010.y, breaks = 30)
+
+HRsw_0 <- filter(HCR_target_vals_UR_wide, HR_sw.x == 0)
+length(HRsw_0$error_HRsw)
+hist(HRsw_0$HR_sw.y, breaks = 30)
+
+TAC4010_0 <- filter(HCR_target_vals_UR_wide, TAC_4010.x == 0)
+length(TAC4010_0$error_TAC4010)
+hist(TAC4010_0$TAC_4010.y, breaks = 30)
+
+TACsw_0 <- filter(HCR_target_vals_UR_wide, TAC_sw.x == 0)
+length(TACsw_0$error_TACsw)
+hist(TACsw_0$TAC_sw.y, breaks = 30)
+
+
+```
+
+
+```{r plots_good_shape_stocks, eval = FALSE}
+##Create plots for each metric
+metrics <- readRDS(paste0("data-generated/performance_metrics_dat.rds"))
+HCR_target_vals <- readRDS(file=paste0("data-generated/HCR_target_vals_dat.rds"))
+metrics <- mutate(metrics, filename = paste0(sp,"_TS",ts,"_",ed,"_rep",j))
+
+metrics$ctrl <- factor(metrics$ctrl,levels=c("HR4010", "HRsw", "TAC4010", "TACsw","BAU"),labels = c("Effort 40-10","Effort step","Catch 40-10","Catch step","BAU"))
+metrics <- mutate(metrics, scenario = paste0(ed,"_",rea_yr,"yr"))
+metrics$scenario <- factor(metrics$scenario, levels =c("OW_5yr","OW_20yr","ED03_5yr","ED03_20yr"))
+metrics$sp <- factor(metrics$sp, levels = c("BC","CR","PS","SA","SJ"),labels = c("Rockfish","Corvina","Sole","Sardine","Tuna"))
+
+#check these have good status and if BBmsy is overestimated for these stocks
+true_hcr_vals <- filter(HCR_target_vals, Model == "true") %>%
+	filter(BBmsy_current >1)
+est_hcr_vals <-filter(HCR_target_vals, Model == "estimated") 
+HCR_target_vals_wide_good_status <-merge(true_hcr_vals,est_hcr_vals,by=c("sp", "ts", "ed","j", "filename")) %>% filter(BBmsy_current.x > 1)
+
+
+estimated_bbmsy_plot <- ggplot(HCR_target_vals_wide_good_status, aes(BBmsy_current.y, colour = sp)) +
+geom_density() + ggtitle(expression("a) estimated B/B"[MSY]*" good status")) +
+geom_vline(xintercept=0,linetype="dotted")+
+	facet_grid(~ed) + 
+	xlab(expression("Estimated B/B"[MSY])) +
+	theme_sleek_hist() 
+estimated_bbmsy_plot
+
+#x = true, y = estimated
+HCR_target_vals_wide_good_status$Error_BBmsy <- (HCR_target_vals_wide_good_status$BBmsy_current.y-HCR_target_vals_wide_good_status$BBmsy_current.x)/HCR_target_vals_wide_good_status$BBmsy_current.x
+
+error_bbmsy_plot <- ggplot(HCR_target_vals_wide_good_status, aes(Error_BBmsy, colour = sp)) +
+geom_density() + ggtitle(expression("c) Prop. Error for B/B"[MSY])) +
+#scale_x_continuous(limits = c(-5, 10)) +
+geom_vline(xintercept=0,linetype="dotted")+
+	facet_grid(~ed) + 
+	xlab(expression("Proportional error B/B"[MSY])) +
+	theme_sleek_hist() 
+
+png(file = paste0("plots/BBmsy_prop_error_good_status_stocks.png"), width = 10, height = 6, units = "in",res=600)
+grid.arrange(estimated_bbmsy_plot, error_bbmsy_plot)
+dev.off()
+
+###BBmsy current ###
+BBmsy_true_dat <- filter(HCR_target_vals, Model == "true") %>%
+	select(filename, BBmsy_current)
+metrics_good_status <- left_join(metrics,BBmsy_true_dat) %>%
+	filter(BBmsy_current >1)
+
+metrics_plot <- dplyr::select(metrics_good_status,sp,ts,ed,j,rea_yr,ctrl,scenario,BBmsy_final) %>%
+	dplyr::rename(perf_metric = BBmsy_final)
+png(file = paste0("plots/performance_plots_current_BBmsy_good_status.png"), width = 8, height = 6, units = "in",res=600)
+	plot_performance_metrics_together_bean(dat=metrics_plot) +
+	geom_hline(yintercept = 1, linetype = "dashed") +
+	geom_hline(yintercept = 0.25, linetype = "dashed",col = "grey") +
+	#ggtitle("Current B/Bmsy status") +
+		ylab(expression("B/B"[MSY]*" (mean of last 3 yrs)")) + 
+	coord_cartesian(ylim=c(0, 6))
+	dev.off()
+
+#change in BBmsy during management for stocks > Bmsy.
+metrics_plot <- dplyr::select(metrics_good_status,sp,ts,ed,j,rea_yr,ctrl,scenario,change_bbmsy) %>%
+	dplyr::rename(perf_metric = change_bbmsy)
+png(file = paste0("plots/performance_plots_current_changeBBmsy_good_status.png"), width = 8, height = 6, units = "in",res=600)
+	plot_performance_metrics_together_bean(dat=metrics_plot) +
+	geom_hline(yintercept = 0, linetype = "dashed") +
+	#ggtitle("Current B/Bmsy status") +
+		ylab(expression("change B/B"[MSY]*" (mean of last 3 yrs)")) #+ 
+		#ylim(c(0,6)) 
+dev.off()
+
+### FFmsy at end of management period
+metrics_plot <- dplyr::select(metrics_good_status,sp,ts,ed,j,rea_yr,ctrl,scenario,FFmsy_final) %>%
+	dplyr::rename(perf_metric = FFmsy_final)
+png(file = paste0("plots/performance_plots_current_FFmsy_good_status.png"), width = 10, height = 6, units = "in",res=600)
+plot_performance_metrics_together_bean(dat=metrics_plot) +
+	geom_hline(yintercept = 1, linetype = "dashed") +
+	ylab(expression("F/F"[MSY]*" (mean of last 3 yrs)"))# +
+dev.off()
+
+
+###mean annual catch during management period relative to Fmsy yield###
+metrics_plot <- dplyr::select(metrics_good_status,sp,ts,ed,j,rea_yr,ctrl,scenario,catch_relFmsy_mean) %>%
+	dplyr::rename(perf_metric = catch_relFmsy_mean)
+png(file = paste0("plots/performance_plots_catch_relFmsy_good_status.png"), width = 10, height = 6, units = "in",res=600)
+plot_performance_metrics_together_bean(dat= metrics_plot) +
+	ylab(expression("Mean catch/year during management relative to F"[MSY]*" yield"))# +
+#	ylim(c(0,3))
+dev.off()
+
+
+#St dev of catches over management period 
+metrics_plot <- dplyr::select(metrics_good_status,sp,ts,ed,j,rea_yr,ctrl,scenario,catch_sd) %>%
+	dplyr::rename(perf_metric = catch_sd)
+png(file = paste0("plots/performance_plots_catch_sd_good_status.png"), width = 8, height = 6, units = "in",res=600)
+plot_performance_metrics_together_bean(dat=metrics_plot) +
+	#ggtitle("Annual variation in catches during mamagement") +
+	ylab("St dev of catches during management") +
+	coord_cartesian(ylim=c(0, 2))
+#ylim(c(0,2))
+dev.off()
+
+
+```
+

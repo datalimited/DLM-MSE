@@ -1,0 +1,517 @@
+---
+	title: "02c-perfect-information-performance-metrics"
+author: "Jessica Walsh"
+date created: "12 Jan 2018"
+output: pdf_document
+---
+	
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, cache=FALSE, autodep = TRUE,
+											message = FALSE, warning = FALSE, fig.height = 6, fig.width = 10)
+```
+Here we test the performance of different HCRs with perfect information. 
+These results show the output from: 
+	
+* 5 havest control rules, 
+* across 5 different species, 
+* for two different harvest control rules (bioeconomic coupling and one-way trip) and 
+* two lengths of management period (5 and 20 yrs)
+* 3 HCR bufffers
+
+Current n = 600 for each scenario
+
+We select the buffer of HCR that ensures 10% BBmsy >0.25 and maximises catch (relative to MSY) across all species and harvest dynamics. If the best buffers differ, we choose the most precautionary one.
+
+###Management objectives
+1.	Maintain median biomass at Bmsy 
+2.  Maintain 10% percentile biomass > 25%BBmsy
+3. 	Avoid collapsed fisheries (i.e. proportion of stocks B <25% Bmsy across full management period)
+3.	Maintain sustainable harvest rate (F/Fmsy) 
+4.  Avoid overfishing (i.e. median F > Fmsy)
+5.	Maximise yield (catch) during management period (total catch over management period relative to fishing at Fmsy)
+
+## Performance metrics
+
+### MSE- Box plots
+* B/Bmsy at end of management period of 5 years and 20 years (averaged over last 3 years)
+* F/Fmsy at the end of management period of 5 and 20 years (averaged over last 3 years)
+* Propotion of years dipping below 0.25 BBmsy.
+* Change in B/Bmsy at end of management period since beginning of management (for those above and below Bmsy) at 5 and 20 years
+* Change in F/Fmsy at end of management period since start of management (for those below and above Fmsy) at 5 and 20 years
+* Total or mean catch over management years (relative to virgin biomass, MSY or yield if fished at Fmsy)
+* St Dev of catches over management years (annual variation)
+
+\newpage
+
+```{r load_packages}
+library(ggplot2)
+library(knitr)
+library(FLCore)
+library(dplyr)
+library(gridExtra)
+
+
+sp_lookup = data.frame(c('BC','SA','PS','SJ','BF','CR'),
+											 c('Rockfish','Sardine','Sole',
+											 	'Tuna','Small Tuna',
+											 	'Corvina'))
+colnames(sp_lookup)<-c('Symbol', 'Name')
+
+species <- factor(levels = c("BC","PS","SJ","SA","CR"))
+
+sce_lookup = data.frame(c("ED03","ED03","OW","OW"),
+												c("5", "20", "5","20"),
+												c("ED03_05yr", "ED03_20yr","OW_05yr", "OW_20yr"))
+colnames(sce_lookup) <- c("ED", "REA_YR", "scenario")
+
+scenario <- factor(c("ED03_05yr", "ED03_20yr","OW_05yr", "OW_20yr"))
+```
+
+```{r set_parameters}
+it = 1
+#iters = 1
+ts = 20					#TS	#length of catch time series before first assessment
+#proj_yr = 20 		# num years to project forward
+length_sim = 60 # num years in simulations
+
+SP <- c("BC","PS","CR","SA","SJ")
+ED <- c("ED03","OW")
+REA_YR = c("5", "20")		# time after first assessment until second assessment
+reps <- 1:600
+#TS <- c(20, 60)
+HCR <- c("HR4010","TAC4010","HRsw","TACsw","BAU")
+BUF <- c(0.5, 0.6, 0.7, 0.75, 0.8, 0.9, 1.0)
+```
+
+```{r make_metric_dataframe_perfect_info, eval = FALSE}
+# ##Create datafile that with all performance metrics across scenarios for perfect info
+#last created 29/01/2018
+#note: takes 5 hours 
+
+## need to redo the data compiling if MSE rerun
+if(!file.exists(file="../data-generated/performance_metrics_true_dat.rds")) {
+
+require(doParallel)
+registerDoParallel(cores = 3)
+getDoParWorkers()
+
+plyr::l_ply(SP, .paropts = list(.export=c("ED", "REA_YR", "reps","HCR", "BUF",
+																					"it", "ts", "length_sim"),
+																.packages = c("FLCore", "dplyr", "gridExtra")),
+						.fun = function(sp) {
+							
+metrics_true <- data.frame(matrix(vector(), 0, 17, dimnames=list(c(), c("sp", "ts", "ed","j","rea_yr","buffer", "ctrl","BBmsy_final", "prop_10bmsy","change_bbmsy","FFmsy_final", "prop_abovefmsy","change_ffmsy", "catch_mean", "rel_catch_tot", "catch_relFmsy_mean", "catch_sd"))), stringsAsFactors=F)
+
+							for (ed in ED) {
+							#	for (sp in SP) {
+									load(paste0("data-raw/sims-", sp,"-",ed,".Rdata"))
+									true_refpts <- sims[[sp]]$brp@refpts
+									Bmsy_sim <- true_refpts["msy", "biomass"] %>% an()
+									Fmsy_sim <- true_refpts["msy", "harvest"] %>% an()
+									Msy_sim <- true_refpts["msy", "yield"] %>% an()
+							
+								for (buffer in BUF) {
+										buff_name <- buffer * 100
+								
+										for (j in reps) {
+											filename_buf <- paste0(sp,"_TS",ts,"_",ed,"_rep",j,"_buf",buff_name)
+											mse_runs_true <- readRDS(file=paste0("data-generated/mse_results/true/buffer",buff_name,"/",ed,"/mse_projection_",filename_buf,"_true.rds"))
+									
+											## Collect each performance metric for all scenarios
+											for (rea_yr in REA_YR) {
+												
+												mgmt_yrs = (length_sim+1):(length_sim+an(rea_yr))
+												years = (length_sim-(ts-1)):(length_sim+an(rea_yr))
+												
+											for (ctrl in HCR) {
+													
+													stock_proj <- eval(parse(text = paste0("mse_runs_true$stock_proj_", ctrl)))
+													stock_proj <- FLCore::iter(stock_proj,it) %>%
+														FLCore::trim(year=years)
+													
+													## B/Bmsy status at end of management period (mean of last 3 years)
+													bbmsy <- FLCore::FLQuant(stock(stock_proj)/Bmsy_sim) %>%
+														FLCore::as.data.frame() %>%
+														dplyr::select(year, data)
+													
+													BBmsy_final <- mean(bbmsy$data[(length(bbmsy$data)-2):length(bbmsy$data)],na.rm=TRUE)
+													
+													## Prop of years that have a projected B/Bmsy below 25%Bmsy
+													prop_25bmsy <- sum(bbmsy$data[bbmsy$year==mgmt_yrs] < 0.25) / an(rea_yr) * 100
+													
+													## Prop of years that have a projected B/Bmsy below 10%Bmsy
+													prop_10bmsy <- sum(bbmsy$data[bbmsy$year==mgmt_yrs] < 0.10) / an(rea_yr) * 100
+													
+													##Change in B/Bmsy since start of management
+													change_bbmsy <- bbmsy$data[bbmsy$year == max(years)] - bbmsy$data[bbmsy$year == (min(mgmt_yrs)-1)]  
+													## F/Fmsy status at end of management period (mean of last 3 years)
+													ffmsy <- FLQuant(fbar(stock_proj)/Fmsy_sim) %>%
+														FLCore::as.data.frame() %>%
+														dplyr::select(year, data)
+													
+													FFmsy_final <- mean(ffmsy$data[(length(ffmsy$data)-2):length(ffmsy$data)],na.rm=TRUE)
+													
+													## F/Fmsy status (proportion of years where F/Fmsy is above Fmsy)
+													prop_abovefmsy <- sum(ffmsy$data[ffmsy$year==mgmt_yrs] > 1)/ an(rea_yr) * 100
+													
+													##Change in F/Fmsy since start of management 
+													# (or should this be mean last 3 years - mean last 3 years before mgmt?)
+													change_ffmsy <- ffmsy$data[ffmsy$year == max(years)]- ffmsy$data[ffmsy$year == (min(mgmt_yrs)-1)] 
+													
+													## Mean catch (across multiple iterations) per year in management period, relative to MSY
+													catch_msy <- FLQuant(catch(stock_proj)/Msy_sim) %>%
+														FLCore::as.data.frame() %>%
+														dplyr::select(year, data)
+													catch_mean <- mean(catch_msy$data[catch_msy$year==mgmt_yrs], na.rm=TRUE)
+													
+													## Mean catch per year in management period, relative to fishing at Fmsy
+													#finding yield across management period if project forward with Fmsy
+													catch_Fmsy <- catch(mse_runs_true$stock_proj_Fmsy) %>% 
+														FLCore::trim(year=years) 
+													
+													catch_relFmsy <- FLQuant(catch(stock_proj)/catch_Fmsy) %>%
+														FLCore::as.data.frame() %>%
+														dplyr::select(year, data)
+													catch_relFmsy_mean <- mean(catch_relFmsy$data[catch_relFmsy$year==mgmt_yrs], na.rm=TRUE)
+													
+													## Total catch across all years in management period (per repitition)
+													rel_catch_vB <- FLQuant(catch(stock_proj)/as.numeric(sims[[sp]]$lh["v"])) %>%
+														FLCore::as.data.frame() %>%
+														dplyr::select(year, data)
+													rel_catch_tot <- sum(rel_catch_vB$data[rel_catch_vB$year == mgmt_yrs], na.rm=TRUE)
+													
+													## Annual variation in catches (standard deviation for each repition) over management period relative to msy
+													catch_sd <- sd(catch_msy$data[catch_msy$year==mgmt_yrs],	na.rm =TRUE)
+													
+													out <- data.frame(sp, ts, ed, buffer, j, rea_yr, ctrl, BBmsy_final, prop_25bmsy, prop_10bmsy, change_bbmsy,FFmsy_final, prop_abovefmsy, change_ffmsy, catch_mean, catch_relFmsy_mean, rel_catch_tot, catch_sd)
+
+												metrics_true <- bind_rows(metrics_true,out)
+													rm(out)
+												}
+											}
+											message(filename_buf)
+										}
+									}
+								}
+						#	}
+							saveRDS(metrics_true, file=paste0("data-generated/performance_metrics_true_dat_",sp,".rds"))
+						}, .parallel = TRUE)
+
+metrics_true_BC <- readRDS(paste0("data-generated/performance_metrics_true_dat_BC.rds"))
+metrics_true_CR <- readRDS(paste0("data-generated/performance_metrics_true_dat_CR.rds"))
+metrics_true_SA <- readRDS(paste0("data-generated/performance_metrics_true_dat_SA.rds"))
+metrics_true_SJ <- readRDS(paste0("data-generated/performance_metrics_true_dat_SJ.rds"))
+metrics_true_PS <- readRDS(paste0("data-generated/performance_metrics_true_dat_PS.rds"))
+
+metrics_true_full <- bind_rows(metrics_true_BC,metrics_true_CR) %>%
+	bind_rows(metrics_true_SA) %>% bind_rows(metrics_true_SJ) %>%
+	bind_rows(metrics_true_PS)
+saveRDS(metrics_true_full, paste0("data-generated/performance_metrics_true_dat.rds"))
+metrics_true <- metrics_true_full
+} else {
+metrics_true <- readRDS(paste0("../data-generated/performance_metrics_true_dat.rds"))
+}
+ 
+```
+
+
+```{r performance_metrics_true_plots_setup}
+##Create plots for each metric
+metrics_true <- readRDS(paste0("data-generated/performance_metrics_true_dat.rds"))
+
+metrics_true$ctrl <- factor(metrics_true$ctrl,levels=(c("HR4010", "HRsw", "TAC4010",  "TACsw","BAU")))
+metrics_true <- mutate(metrics_true, scenario = paste0(ed,"_",rea_yr,"yr"))
+metrics_true$scenario <- factor(metrics_true$scenario, levels =c("ED03_5yr","ED03_20yr","OW_5yr","OW_20yr"))
+metrics_true$sp <- factor(metrics_true$sp, levels = c("BC","CR","PS","SA","SJ"),labels = c("Rockfish","Corvina","Sole","Sardine","Tuna"))
+
+plot_performance_metrics_true_together <- function(dat) {
+	ggplot(dat, aes(as.factor(ctrl), perf_metric)) + 
+		geom_boxplot(aes(fill=factor(ctrl))) +
+		scale_fill_brewer(palette="Paired") +
+		#scale_fill_manual (values=cols) +
+		xlab("Harvest Control Rule") +
+		facet_grid(scenario~sp) +
+		theme_bw() +
+		theme(axis.text=element_text(size=10),
+					axis.title=element_text(size=14),
+					#axis.title.y=element_text(margin=margin(10,10,0,0)),
+					#axis.title.x=element_text(margin=margin(10,8,0,0)),
+					axis.text.x=element_text(angle=90, vjust=0.4,hjust=1),
+					plot.title=element_text(size=18),
+					legend.title = element_blank())
+}
+
+#pdf(file = paste0("../plots/performance_metrics_true_plots.pdf"), width = 16, height = 9)
+
+###BBmsy current ###
+metrics_true_plot <- select(metrics_true,sp,ts,ed,j,rea_yr,buffer,ctrl,scenario,BBmsy_final) %>%
+	rename(perf_metric = BBmsy_final)
+pdf(file = paste0("plots/performance_metrics_true_plots_current_BBmsy_together.pdf"), width = 16, height = 9)
+for (i in 1:length(BUF)) {
+dat_temp <- subset(metrics_true_plot, buffer == BUF[i])
+plotx <- plot_performance_metrics_true_together(dat_temp) +
+	geom_hline(yintercept = 1, linetype = "dashed") +
+	ggtitle(paste("Current B/Bmsy status TRUE Info ",BUF[i])) +
+	ylab("B/Bmsy (mean of last 3 yrs)") + 
+	ylim(c(0,4))
+print(plotx)
+}
+dev.off()
+
+###Change in BBmsy###
+# metrics_true_plot <- select(metrics_true,sp,ts,ed,j,rea_yr,buffer,ctrl,scenario,change_bbmsy) %>%
+# 	rename(perf_metric = change_bbmsy)
+# #pdf(file = paste0("plots/performance_metrics_true_plots_current_BBmsy_together.pdf"), width = 16, height = 9)
+# for (i in 1:length(BUF)) {
+# dat_temp <- subset(metrics_true_plot, buffer == BUF[i])
+# plotx <- plot_performance_metrics_true_together(dat_temp) +
+# 	#ggtitle(paste("Change in B/Bmsy ", ed_plot, rea_year, "yrs")) +
+# 	ggtitle("Change in B/Bmsy since first assessment") +
+# 	ylab("Change in B/Bmsy") +
+# 	geom_hline(yintercept = 0, linetype = "dashed") # +
+# #	ylim(c(-2,2))
+# print(plotx)
+# }
+# #dev.off()
+
+### Prop of years that stocks were overfished (<25%Bmsy)
+metrics_true_plot <- select(metrics_true,sp,ts,ed,j,rea_yr,buffer,ctrl,scenario,prop_25bmsy) %>%
+	rename(perf_metric = prop_25bmsy)
+for (i in 1:length(BUF)) {
+dat_temp <- subset(metrics_true_plot, buffer == BUF[i])
+plotx <- plot_performance_metrics_true_together(dat = dat_temp) +
+	ggtitle(paste("Prop. years overfished (<25%Bmsy)",BUF[i])) +
+	ylab("Prop. years below 25% Bmsy")
+print(plotx)
+}
+
+### Prop of years that stocks were collapsed (<10%Bmsy)
+metrics_true_plot <- select(metrics_true,sp,ts,ed,j,rea_yr,buffer,ctrl,scenario,prop_10bmsy) %>%
+	rename(perf_metric = prop_10bmsy)
+for (i in 1:length(BUF)) {
+dat_temp <- subset(metrics_true_plot, buffer == BUF[i])
+plotx <- plot_performance_metrics_true_together(dat= dat_temp) +
+	ggtitle(paste("Prop. years with collapsed stock",BUF[i])) +
+	ylab("Prop. years below 10% Bmsy")
+print(plotx)
+}
+
+### FFmsy at end of management period
+metrics_true_plot <- select(metrics_true,sp,ts,ed,j,rea_yr,buffer,ctrl,scenario,FFmsy_final) %>%
+	rename(perf_metric = FFmsy_final)
+pdf(file = paste0("plots/performance_metrics_true_plots_current_FFmsy_together.pdf"), width = 16, height = 9)
+for (i in 1:length(BUF)) {
+dat_temp <- subset(metrics_true_plot, buffer == BUF[i])
+plotx <- plot_performance_metrics_true_together(dat= dat_temp) +
+	geom_hline(yintercept = 1, linetype = "dashed") +
+	ggtitle(paste("F/Fmsy status - end of management period",BUF[i])) +
+	ylab("F/Fmsy (mean of last 3 yrs)") +
+	ylim(c(0,4))
+print(plotx)
+}
+dev.off()
+
+###Change in FFmsy###
+metrics_true_plot <- select(metrics_true,sp,ts,ed,j,rea_yr,buffer,ctrl,scenario,change_ffmsy) %>%
+	rename(perf_metric = change_ffmsy)
+for (i in 1:length(BUF)) {
+dat_temp <- subset(metrics_true_plot, buffer == BUF[i])
+plotx <- plot_performance_metrics_true_together(dat=dat_temp) +
+	#ggtitle("Change in F/Fmsy since management") +
+	ylab("Change in F/Fmsy") +
+	geom_hline(yintercept = 0, linetype = "dashed")
+print(plotx)
+}
+
+### Prop of years that stocks with overfishing (>Fmsy)
+metrics_true_plot <- select(metrics_true,sp,ts,ed,j,rea_yr,ctrl,scenario,prop_abovefmsy) %>%
+	rename(perf_metric = prop_abovefmsy)
+for (i in 1:length(BUF)) {
+dat_temp <- subset(metrics_true_plot, buffer == BUF[i])
+plotx <- plot_performance_metrics_true_together(dat=dat_temp) +
+	ggtitle("Prop. years overfishing during management") +
+	ylab("Prop. years above F/Fmsy")
+print(plotx)
+}
+
+###Total catch over management period relative to virgin biomass ###
+metrics_true_plot <- select(metrics_true,sp,ts,ed,j,rea_yr,buffer,ctrl,scenario,rel_catch_tot) %>%
+	rename(perf_metric = rel_catch_tot)
+for (i in 1:length(BUF)) {
+dat_temp <- subset(metrics_true_plot, buffer == BUF[i])
+plotx <- plot_performance_metrics_true_together(dat=dat_temp) +
+	#ggtitle(paste("Total catch, relative to virgin biomass", ed_plot, rea_year, "yrs")) +
+	ggtitle("Total catch, relative to virgin biomass") +
+	geom_hline(yintercept = 1, linetype = "dashed") +
+	ylab("Total catch during management") #+
+#	ylim(c(0,2))
+print(plotx)
+}
+
+###mean annual catch during management period###
+metrics_true_plot <- select(metrics_true,sp,ts,ed,j,rea_yr,buffer,ctrl,scenario,catch_mean) %>%
+	rename(perf_metric = catch_mean)
+#pdf(file = paste0("plots/performance_metrics_true_plots_catch_mean_together.pdf"), width = 16, height = 9)
+for (i in 1:length(BUF)) {
+dat_temp <- subset(metrics_true_plot, buffer == BUF[i])
+plotx <- plot_performance_metrics_true_together(dat= dat_temp) +
+	ggtitle(paste("Mean catch/year, relative to MSY",BUF[i])) +
+	geom_hline(yintercept = 1, linetype = "dashed") +
+	ylab("Mean catch/year during management") #+
+#	ylim(c(0,3))
+print(plotx)
+}
+#dev.off()
+
+###mean annual catch during management period, relative to yield at Fmsy###
+metrics_true_plot <- select(metrics_true,sp,ts,ed,j,rea_yr,buffer,ctrl,scenario,catch_relFmsy_mean) %>%
+	rename(perf_metric = catch_relFmsy_mean)
+pdf(file = paste0("plots/performance_metrics_true_plots_catch_mean_together_Fmsy.pdf"), width = 16, height = 9)
+for (i in 1:length(BUF)) {
+dat_temp <- subset(metrics_true_plot, buffer == BUF[i])
+plotx <- plot_performance_metrics_true_together(dat= dat_temp) +
+	ggtitle(paste("Mean catch/year, relative to FMSY", BUF[i])) +
+	geom_hline(yintercept = 1, linetype = "dashed") +
+	ylab("Mean catch/year during management, relative to yield at Fmsy") +
+ ylim(c(0,3))
+print(plotx)
+}
+dev.off()
+
+
+###St dev of catches over management period ####
+metrics_true_plot <- select(metrics_true,sp,ts,ed,j,rea_yr,buffer,ctrl,scenario,catch_sd) %>%
+	rename(perf_metric = catch_sd)
+#pdf(file = paste0("plots/performance_metrics_true_plots_catch_sd_together.pdf"), width = 16, height = 9)
+#png(file = paste0("plots/performance_metrics_true_plots_catch_sd_together.png"), width = 10, height = 6, units = "in",res=600)
+for (i in 1:length(BUF)) {
+dat_temp <- subset(metrics_true_plot, buffer == BUF[i])
+plotx <- plot_performance_metrics_true_together(dat=dat_temp) +
+	ggtitle(paste("Annual variation in catches during mamagement",BUF[i])) +
+	ylab("St dev of catches during management") #+
+#	ylim(c(0,2))
+print(plotx)
+}
+#dev.off()
+
+```
+
+\newpage
+
+##Summary tables
+
+* Proportion of stocks that go below 25% Bmsy (averaged across all management period) (overfished levels)
+* Proportion of stocks that end the management period at F>Fmsy (overfishing)
+
+```{r summary_tables, eval=TRUE}
+metrics_true <- readRDS("data-generated/performance_metrics_true_dat.rds")
+
+dat <- group_by(metrics_true, sp, ed, rea_yr, buffer, ctrl) %>%
+	summarise(#prop_stocks_overfished = sum(BBmsy_final<0.25)/length(BBmsy_final),
+		prop_stocks_not_overfished = sum(BBmsy_final>0.25)/length(BBmsy_final),
+		av_bbmsy = median(BBmsy_final),
+		pc10_bbmsy = quantile(BBmsy_final,0.1),
+		av_ffmsy = median(FFmsy_final),
+		prop_stocks_overfishing = sum(FFmsy_final>1) /length(FFmsy_final),
+		prop_stocks_no_overfishing = sum(FFmsy_final<1) /length(FFmsy_final),
+		mean_catch_low = sum(catch_mean<0.8)/length(catch_mean),
+		av_catch_msy = median(catch_mean),
+		av_catch_Fmsy = median(catch_relFmsy_mean),
+		av_catch_variation =median(catch_sd))
+
+buffer_dat_05 <- filter(dat, rea_yr == "5") %>%
+	group_by(buffer, ctrl) %>%
+	summarise(mean_bbmsy = mean(av_bbmsy),
+						pc_bbmsy = mean(pc10_bbmsy),
+						mean_ffmsy = mean(av_ffmsy),
+						av_catch = mean(av_catch_Fmsy))
+
+buffer_dat_05
+
+best_buffer_05 <- filter(buffer_dat_05, pc_bbmsy > 0.25) %>%
+	group_by(ctrl) %>%
+	filter(av_catch == max(av_catch)) 
+
+best_buffer_05
+
+buffer_dat_20 <- filter(dat, rea_yr == "20") %>%
+	group_by(buffer, ctrl) %>%
+	summarise(mean_bbmsy = mean(av_bbmsy),
+						pc_bbmsy = mean(pc10_bbmsy),
+						mean_ffmsy = mean(av_ffmsy),
+						av_catch = mean(av_catch_Fmsy))
+
+buffer_dat_20
+
+best_buffer_20 <- filter(buffer_dat_20, pc_bbmsy > 0.25) %>%
+	group_by(ctrl) %>%
+	filter(av_catch == max(av_catch)) 
+
+best_buffer_20
+
+```
+
+After 5 years using true data, 80% buffer is sufficient at keeping 90% of stocks on average (across sp and harvest dynamics) above 25%Bmsy, while maximising catch.
+
+So we should try 100% and 90%.
+
+### Trade-offs between objectives - NOT FIXED FOR BUFFERS
+
+```{r radar_plots}
+dat_OW_5yr <- read.csv(file = "../data-generated/summary_stats/dat_OW_5yr_table.csv")
+
+#package - fmsb
+library(fmsb)
+
+#set min and max values per each axix
+maxmin <- data.frame(
+	prop_stocks_not_overfished = c(1, 0),
+	av_bbmsy=c(1.25,0),
+	prop_stocks_no_overfishing = c(1, 0),
+	#av_catch = c(1.25, 0),
+	av_catch_Fmsy = c(1.25, 0)) # check # TODO
+
+ctrl_col <- RColorBrewer::brewer.pal(5,"Paired")
+
+# #make dataset
+# summary_OW5yr_BC <- dat_OW_5yr %>%
+# 	filter(sp == "BC") %>%
+# reshape::cast(ctrl ~ variable, margins = FALSE)
+# 
+# #including only metrics we are interested in for radar plots
+# radar_OW5yr_BC <- summary_OW5yr_BC[,c(1,3,4,7,9)] 
+# 
+# #re order rows so that BAU is at the bottom - for colour order in pallette
+# radar_OW5yr_BC <- radar_OW5yr_BC[c(2:5,1),-1]
+# 
+# radar_OW5yr_BC <- rbind(maxmin,radar_OW5yr_BC)
+# 
+# dat_radar <- list(radar_OW5yr_BC=radar_OW5yr_BC,radar_OW5yr_SA=radar_OW5yr_SA,radar_OW5yr_CR=radar_OW5yr_CR)
+
+sp_lookup_5 <- filter(sp_lookup, Symbol != "BF") %>%
+	droplevels()
+
+#make graph with all species
+#pdf(file= "plots/radar_plot.pdf",width = 8, height = 12)
+png(filename = "../plots/radar_plot.png",width = 8, height = 12, units = "in",res = 600)
+op <- par(mar=c(1, .5, 1, .5),mfrow=c(3, 2))
+lapply(sp_lookup_5$Symbol, function(i) { 
+	
+	summary_OW5yr <- dat_OW_5yr %>%
+		filter(sp == i) %>%
+		reshape::cast(ctrl ~ variable, margins = FALSE)
+	
+	#including only metrics we are interested in for radar plots
+	# av_bbmsy, av_catch, prop_stocks_not_overfished, prop_stock_no_overfishing
+	radar_OW5yr<- summary_OW5yr[,c(1,2,3,8,9)]  #change to be catch_relFmsy
+	radar_OW5yr <- radar_OW5yr[c(2:5,1),-1]
+	radar_OW5yr <- rbind(maxmin,radar_OW5yr)
+	
+	radarchart(radar_OW5yr,axistype=3, seg=5, vlabels=c("Prop stocks\nnot heavily overfished","Median\nstatus", "Prop stocks with\nno overfishing", "Median\nyield"),
+						 title= sp_lookup$Name[match(i,sp_lookup$Symbol)], axislabcol = "black", vlcex=1, pcol=ctrl_col, caxislabels = c("0","","","","","1"),plty=rep(1,5),plwd = rep(2,5))
+})
+dev.off()
+#par(op)
+
+```
+

@@ -1,0 +1,234 @@
+---
+title: "Plots of simulated stocks"
+author: "Jessica Walsh"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, cache=FALSE, autodep = TRUE,
+  message = FALSE, warning = FALSE, fig.height = 5, fig.width = 9)
+```
+
+```{r load-packages, echo=FALSE}
+library(ggplotFL)
+library(FLBRP)
+library(knitr)
+library(dplyr)
+library(kobe)
+```
+
+##Simulations 
+
+```{r, eval=TRUE, echo=FALSE, warning=FALSE,results='asis'}
+sp_lookup = data.frame(c('BC','SA','PS','SJ','CR'),
+                       c('Boccacio','Sardine','Petrale sole',
+                         'Skipjack tuna', 
+                         'Corvina reina'))
+colnames(sp_lookup)<-c('Symbol', 'Name')
+
+species <- c("BC","SA","PS","SJ","CR")
+ED = "OW"
+#need to knit this document for each ED seperately - and then manually change the name to specify which ED you used.
+# ED = c("ED03", "OW")
+
+for (ed in ED) {
+	for (sp in species) {
+		load(paste0("../data-raw/sims-",sp,"-",ed,".RData"))
+		name = sp_lookup$Name[match(sp,sp_lookup$Symbol)]
+		
+		stock = eval(parse(text=paste0('sims','$',sp,'$stock')))
+		
+		cat (paste0(name))
+		cat ("\n\n")
+		stock_full <- FLCore::iter(sims[[1]][["stock"]],1)
+		TS = FLCore::dims(stock_full)$maxyear
+		
+		brp_plot <- (plot(sims[[1]][["brp"]]) + ggtitle(name))
+		#print(brp_plot + ggtitle(name))
+		
+		refpts(sims[[1]][["brp"]])
+		
+		lh_plot <- ggplot(FLQuants(sims[[1]][["brp"]], "stock.wt", "catch.wt", "catch.sel", "mat", "m")) +
+			geom_line(aes(age, data)) +
+			facet_wrap(~qname, scale = "free") +
+			ggtitle(name)
+		print(lh_plot)
+		
+		# stock_iter1 <-FLQuants(FLCore::iter(sims$BC$stock,1))
+		#  ggplot(stock_iter1, "stock.wt", "mat", "catch.wt","catch.sel","m")) + 
+		#  	geom_line(aes(age, data, col = iter)) + 
+		#  	facet_wrap(~qname, scale = "free")
+		
+		its = 1
+		full_vs_iter_stk_plot <- plot(FLStocks(all_iters = stock, iter = FLCore::iter(stock, c(its)))) + 
+			scale_x_continuous(limits = c(1,60)) + 
+			facet_wrap(~qname, ncol = 2, scale = "free") +
+			ggtitle(name) +
+			theme_bw() +
+			theme(strip.background = element_rect(fill = "white", color = NULL, size = 0.05),
+						panel.margin = unit(1, "lines"))
+		#png(filename = "plots/pres_CR_OW_sims.png",width = 8, height = 5,units = "in",res= 600)
+		print(full_vs_iter_stk_plot)
+		#dev.off()
+		
+		
+		# 
+		# 
+		#	num_stk_ct_plot <- ggplot(FLQuants(iter(stock,c(1,50,100,150,200,250)), "stock.n", "catch.n")) + 	geom_line(aes(age, data, col = iter)) +
+		# 	facet_wrap(~qname, scale = "free") +
+		# 	ggtitle(name)
+		# print(num_stk_ct_plot)
+		
+		
+		#plot(stock_full) + ggtitle(paste0(name," iter = 1"))
+		
+		# age_vs_stockn_plot <- plot(stock.n(stock_full)) + ggtitle(paste0(name, " Stock.Num vs Age"))
+		# print(age_vs_stockn_plot)
+		# 
+		# age_vs_catchn_plot <- plot(catch.n(stock_full)) + ggtitle(paste0(name, " Catch.Num vs Age"))
+		# print(age_vs_catchn_plot)
+		
+		
+		stk_ct_ssb_plot <- function() {
+			plot(1:TS,stock(stock_full),type="o",col="red",
+					 ylim=c(0,max(stock(stock_full))),
+					 main= paste0(name," iter = 1"), 
+					 ylab= "Biomass or Catch (tonnes)", xlab="Year")
+			lines(1:TS,ssb(stock_full),type="o",col="pink")
+			lines(1:TS,catch(stock_full),type="o", lty= 5, col="blue")
+			legend("topleft", inset=0, legend = c("Stock biomass", "SSB", "Catch"), 
+						 col=c("red","pink","blue"), 
+						 lty = c(1,1,1),
+						 horiz=FALSE,cex=0.6,bty = "n",bg = "n")
+		}
+		stk_ct_ssb_plot()
+		
+		#f/fmsy over time vs ypr 
+		plot(fbar(sims[[sp]]$brp),ypr(sims[[sp]]$brp))
+		
+		#phase plots
+		bbmsy <- stock(stock)/sims[[sp]]$brp@refpts["msy","biomass"]
+		ffmsy <- fbar(stock)/sims[[sp]]$brp@refpts["msy","harvest"]
+		
+		bbmsy1 <- an(iter(bbmsy,2))
+		ffmsy1 <- an(iter(ffmsy,2))
+		
+		n = 1:((dims(stock)$maxyear)-1)
+		plot(bbmsy1,ffmsy1)
+		abline(v = 1)
+		abline(h = 1)
+		
+		for (i in n) {
+			arrows(bbmsy1[i], ffmsy1[i],
+						 bbmsy1[i+1], ffmsy1[i+1], length = 0.1, col = "grey")
+		}
+		cat("\n\n\\pagebreak\n")
+		
+	}
+}
+# plot(1:34,an(stock@harvest[1:34,1,1,1,1,1]),ylab = "harvest.rate",xlab="age",ylim=c(0,0.4))
+# for (i in 1:60) {
+# 	lines(1:34,an(stock@harvest[1:34,i,1,1,1,1]))
+# }
+
+# ggplot(stock.n(stock_full), aes(year, as.factor(age), size=data)) + geom_point(shape=21) + scale_size(range = c(1, 20)) + ylab("age") + theme(legend.position = "none") + ggtitle(name)
+
+
+```
+
+```{r ref_points_table}
+#ED = c("ED03", "OW")
+# ed = "OW"
+# species <- c("BC","SA","PS","SJ","CR")
+# 
+# sp_lookup = data.frame(c('BC','SA','PS','SJ','CR'),
+#                        c('Boccacio','Sardine','Petrale sole',
+#                          'Skipjack tuna',
+#                          'Corvina reina'))
+# colnames(sp_lookup)<-c('Symbol', 'Name')
+# 
+# sp_ref_pts <- mutate(sp_lookup, BmsyB0_ratio = "NA")
+# 
+# for (sp in species) {
+# 	load(paste0("../data-raw/sims-",sp,"-",ed,".RData"))
+# 	name = sp_lookup$Name[match(sp,sp_lookup$Symbol)]
+# 	
+# 	#cat (paste0(name))
+# 
+# 	#brp_plot <- (plot(sims[[1]][["brp"]]) + ggtitle(name))
+# 	#print(brp_plot + ggtitle(name))
+# 	
+# 	ref.pts <- refpts(sims[[1]][["brp"]])
+# 	
+# 	ref.pts
+# 	Bmsy_B0_ratio <- ref.pts["msy","biomass"]/ref.pts["virgin","biomass"]
+# 	Bmsy_B0_ratio
+# 	
+# 	sp_ref_pts$BmsyB0_ratio[match(sp,sp_lookup$Symbol)] = Bmsy_B0_ratio
+# 	
+# }
+# 
+# #sp_ref_pts <- cbind(sp_ref_pts,Bmsy_B0_ratio_proxy)
+
+```
+
+####Table 1: Life history traits for case study species 
+
+
+```{r}
+# sce <-readRDS(file="../data-raw/sim_life_history_settings.rds")
+# 
+# species <- c("BC","SA","PS","SJ","CR")
+# 
+# ##Life history parameters 
+
+# table_LH <- data.frame(stock = numeric(0), linf = numeric(0),sl=numeric(0), sr= numeric(0),a1= numeric(0),
+# 											 s=numeric(0),vBiomass=numeric(0), a50 = numeric(0), k = numeric(0), a = numeric(0), 
+# 											 b = numeric(0), margSD=numeric(0),rho=numeric(0), 
+# 											 minage=numeric(0),maxage = numeric(0), mnfbar=numeric(0),maxbfar=numeric(0),
+# 											 ID=numeric(0), ED=numeric(0), sigmaC=numeric(0), 
+# 											 resilience=numeric(0),species_cat=numeric(0))
+# 
+# for (i in species){
+# par_temp <- if (length(sce$LH[[i]]$par) == 11) {
+# 	c(ac(names(sce$LH[i])),sce$LH[[i]]$par["linf"], sce$LH[[i]]$par["sl"],sce$LH[[i]]$par["sr"],
+# 							sce$LH[[i]]$par["a1"], sce$LH[[i]]$par["s"], sce$LH[[i]]$par["v"], sce$LH[[i]]$par["a50"],
+# 							sce$LH[[i]]$par["k"], sce$LH[[i]]$par["a"], sce$LH[[i]]$par["b"], 
+# 							sce$LH[[i]]$margSD, sce$LH[[i]]$rho, sce$LH[[i]]$range["min"], sce$LH[[i]]$range["max"], 
+# 							sce$LH[[i]]$range["minfbar"], sce$LH[[i]]$range["maxfbar"], sce$LH[[i]]$ID, sce$LH[[i]]$ED,
+# 							sce$LH[[i]]$sigmaC, sce$LH[[i]]$resilience, sce$LH[[i]]$species_cat)
+# } else {
+# 		c(ac(names(sce$LH[i])),sce$LH[[i]]$par["linf"], sce$LH[[i]]$par["sl"],sce$LH[[i]]$par["sr"],
+# 							sce$LH[[i]]$par["a1"], sce$LH[[i]]$par["s"], sce$LH[[i]]$par["v"], NA,
+# 							sce$LH[[i]]$par["k"], sce$LH[[i]]$par["a"], sce$LH[[i]]$par["b"], sce$LH[[i]]$margSD,
+# 							sce$LH[[i]]$rho, sce$LH[[i]]$range["min"], sce$LH[[i]]$range["max"], 
+# 							sce$LH[[i]]$range["minfbar"], sce$LH[[i]]$range["maxfbar"] ,sce$LH[[i]]$ID, sce$LH[[i]]$ED,
+# 							sce$LH[[i]]$sigmaC, sce$LH[[i]]$resilience, sce$LH[[i]]$species_cat)
+# }
+# 
+# table_LH[i, ] <- par_temp
+# }
+# 
+# 
+# table_LH_t <- as.data.frame(t(table_LH[,2:21]))
+# 
+# names(table_LH_t) <- c('Boccacio','Sardine','Petrale',
+#                          'Skipjack', 'Corvina')
+# 
+# LH_variables <- as.data.frame(c("L infinity", "Selectivity Lhand", "Selectivity Rhand", "Age at max selectivity",
+# 																"Steepness", "Virgin biomass", "Age at 50% maturity", "K (von Bertalanfy)",
+# 																"length-weight param a", "length-weight param b",
+# 																"Recruitment variability", "Recruitment autocorrelation", "Min age", "Max age", 
+# 																"Min age fished", "Max age fished", "Initial depletion", "Effort dynamics",
+# 																"Measurement error of catch", "Under-reporting"))
+# names(LH_variables) <- "Variable"
+# 
+# table_LH_t <- bind_cols(LH_variables, table_LH_t)
+# kable(table_LH_t[,], format = "markdown")
+# 
+# LH_categories <-  data.frame(Species = c('Boccacio','Sardine','Petrale sole',
+#                          'Skipjack tuna',
+#                          'Corvina reina'), Resilience = table_LH[,22], Species_cat = table_LH[,23])
+# kable(LH_categories[,], format = "markdown")
+```
+
