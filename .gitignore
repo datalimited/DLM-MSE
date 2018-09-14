@@ -1,0 +1,15 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+.jpeg
+data-generated/
+data-raw/
+DLM-MSE.Rproj
+*.dll
+*.cpp
+*.o
+*.pdf
+
+
